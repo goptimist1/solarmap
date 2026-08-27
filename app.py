@@ -7,8 +7,8 @@ import pandas as pd
 import requests
 import streamlit as st
 import folium
-from folium.plugins import MeasureControl, LocateControl, MarkerCluster
-from streamlit_folium import st_folium, folium_static
+from folium.plugins import MeasureControl, LocateControl
+from streamlit_folium import st_folium
 
 # ============================================================
 # Solar Mkt Map - improved production-oriented version
@@ -630,10 +630,10 @@ with st.expander("지도안내"):
     </div>
     """, unsafe_allow_html=True)
 
-m = folium.Map(location=st.session_state.search_center,zoom_start=st.session_state.map_zoom,max_zoom=19,tiles="OpenStreetMap")
+m = folium.Map(location=st.session_state.search_center, zoom_start=st.session_state.map_zoom, max_zoom=19, tiles="OpenStreetMap")
 folium.TileLayer(
     tiles="https://xdworld.vworld.kr/2d/Satellite/service/{z}/{x}/{y}.jpeg",
-    attr="VWorld", name="위성지도", max_zoom=19, max_native_zoom=18, control=False
+    attr="VWorld", name="위성지도", max_zoom=19, max_native_zoom=18, control=True, overlay=False, show=True
 ).add_to(m)
 folium.raster_layers.WmsTileLayer(
     url="https://api.vworld.kr/req/wms",
@@ -644,7 +644,7 @@ folium.raster_layers.WmsTileLayer(
     attr="VWorld Cadastral", name="지적도(지번경계)", overlay=True,
     control=True, opacity=0.6, show=False
 ).add_to(m)
-folium.LayerControl().add_to(m)
+folium.LayerControl(position="topright", collapsed=False).add_to(m)
 LocateControl(position="topleft", strings={"title":"내 위치 확인", "popup":"현재 위치"}, drawCircle=True, showPopup=False, keepCurrentZoomLevel=False).add_to(m)
 m.add_child(MeasureControl(position="topright", primary_length_unit="meters", secondary_length_unit=None, primary_area_unit="sqmeters", secondary_area_unit=None))
 
@@ -669,11 +669,17 @@ df_all = normalize_df(st.session_state.target_data)
 st.session_state.target_data = df_all
 
 df_filtered = df_all[df_all["면적"] >= float(min_area)].copy() if not df_all.empty else df_all
-marker_cluster = MarkerCluster().add_to(m)
+
+marker_count = 0
+coord_missing_count = 0
 
 for _, row in df_filtered.iterrows():
-    if not row["lat"] or not row["lng"]:
+    lat = pd.to_numeric(row.get("lat"), errors="coerce")
+    lng = pd.to_numeric(row.get("lng"), errors="coerce")
+    if pd.isna(lat) or pd.isna(lng) or float(lat) == 0 or float(lng) == 0:
+        coord_missing_count += 1
         continue
+
     selected = st.session_state.selected_site_id == row["site_id"]
     color = "purple" if selected else STATUS_COLORS.get(row.get("상태", "미컨택"), "red")
     icon = "star" if selected or bool(row.get("수동등록", False)) else "info-sign"
@@ -681,14 +687,16 @@ for _, row in df_filtered.iterrows():
     addr = html.escape(str(row.get("지번주소", "")))
     popup = f"<b>{name}</b><br>{addr}<br>면적: {float(row['면적']):,.1f}㎡<br>상태: {html.escape(str(row.get('상태','')))}"
     folium.Marker(
-        [row["lat"], row["lng"]],
+        [float(lat), float(lng)],
         tooltip=name,
         popup=folium.Popup(popup, max_width=280),
         icon=folium.Icon(color=color, icon=icon),
-    ).add_to(marker_cluster)
+    ).add_to(m)
+    marker_count += 1
 
-folium_static(m, width=700, height=450)
-map_data = {}
+st.caption(f"지도 표시 대상 {len(df_filtered):,}건 · 실제 핀 {marker_count:,}개 · 좌표 없음 {coord_missing_count:,}개")
+
+map_data = st_folium(m, width="100%", height=450, returned_objects=["last_object_clicked", "last_clicked"])
 clicked_marker = map_data.get("last_object_clicked")
 clicked_map = map_data.get("last_clicked")
 
