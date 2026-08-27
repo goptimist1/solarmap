@@ -1,5 +1,6 @@
 import os
 import html
+import json
 import urllib.parse
 from datetime import datetime
 
@@ -7,6 +8,8 @@ import pandas as pd
 import requests
 import streamlit as st
 import folium
+from branca.element import MacroElement
+from jinja2 import Template
 from folium.plugins import MeasureControl, LocateControl, MarkerCluster
 from streamlit_folium import st_folium
 
@@ -151,6 +154,8 @@ def init_state():
         "new_pin_coord": None,
         "save_success": False,
         "last_loaded_tab": "",
+        "activity_status": "",
+        "activity_rows_session": [],
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -349,38 +354,50 @@ def save_target_data(tab_name: str, df: pd.DataFrame) -> bool:
 
 
 def append_activity(site_id: str, tab_name: str, before: dict, after: dict, action: str) -> bool:
-    """Append one cumulative activity row to a separate Google worksheet."""
+    """Write one activity record to Google Sheets, with a local/session fallback."""
+    row = activity_row(site_id, tab_name, before, after, action)
+    headers = [
+        "기록일시", "site_id", "지역탭", "상호명", "지번주소",
+        "접촉방식", "상태", "면적", "메모", "변경내역", "행동"
+    ]
+
+    # Always keep the latest record in this browser session so the UI can show
+    # it immediately even if a remote write temporarily fails.
+    st.session_state.activity_rows_session = [row] + list(st.session_state.get("activity_rows_session", []))
+
     gc = get_gspread_client()
-    if not gc:
-        # During CSV-only development, maintain a local activity file.
-        path = "activity_log.csv"
-        row = activity_row(site_id, tab_name, before, after, action)
+    if gc:
         try:
-            old = pd.read_csv(path) if os.path.exists(path) else pd.DataFrame()
-            pd.concat([old, pd.DataFrame([row])], ignore_index=True).to_csv(path, index=False, encoding="utf-8-sig")
+            sh = gc.open_by_key(GOOGLE_SHEET_ID)
+            ws = get_or_create_ws(sh, "activity_log", rows=1000, cols=len(headers))
+            existing = ws.get_all_values()
+            if not existing:
+                ws.update(values=[headers], range_name="A1")
+            elif existing[0][:len(headers)] != headers:
+                # Do not destroy existing records; just ensure the expected
+                # header row is present/consistent at the top.
+                current_headers = existing[0]
+                if len(current_headers) < len(headers) or current_headers[:len(headers)] != headers:
+                    ws.update(values=[headers], range_name="A1")
+            ws.append_row([row.get(h, "") for h in headers], value_input_option="USER_ENTERED")
             load_activity_log.clear()
+            st.session_state.activity_status = "Google Sheets 활동 이력 저장 완료"
             return True
         except Exception as e:
-            st.warning(f"활동 이력 저장 실패: {e}")
-            return False
+            st.session_state.activity_status = f"Google Sheets 활동 이력 저장 실패 → 임시 저장: {e}"
 
+    # Fallback for setup/deployment problems.
+    path = "activity_log.csv"
     try:
-        sh = gc.open_by_key(GOOGLE_SHEET_ID)
-        ws = get_or_create_ws(sh, "activity_log", rows=1000, cols=12)
-        headers = [
-            "기록일시", "site_id", "지역탭", "상호명", "지번주소",
-            "접촉방식", "상태", "면적", "메모", "변경내역", "행동"
-        ]
-        if not ws.get_all_values():
-            ws.update(values=[headers], range_name="A1")
-        row = activity_row(site_id, tab_name, before, after, action)
-        ws.append_row([row.get(h, "") for h in headers], value_input_option="USER_ENTERED")
+        old = pd.read_csv(path) if os.path.exists(path) else pd.DataFrame(columns=headers)
+        pd.concat([old, pd.DataFrame([row])], ignore_index=True).to_csv(path, index=False, encoding="utf-8-sig")
         load_activity_log.clear()
+        if not st.session_state.activity_status:
+            st.session_state.activity_status = "CSV 활동 이력 저장 완료"
         return True
     except Exception as e:
-        st.warning(f"활동 이력 저장 실패: {e}")
+        st.session_state.activity_status = f"활동 이력 저장 실패: {e}"
         return False
-
 
 def activity_row(site_id, tab_name, before, after, action):
     changes = []
@@ -406,23 +423,31 @@ def activity_row(site_id, tab_name, before, after, action):
     }
 
 
-@st.cache_data(ttl=15, show_spinner=False)
+@st.cache_data(ttl=10, show_spinner=False)
 def load_activity_log() -> pd.DataFrame:
     gc = get_gspread_client()
     if gc:
         try:
             sh = gc.open_by_key(GOOGLE_SHEET_ID)
-            ws = get_or_create_ws(sh, "activity_log", rows=1000, cols=12)
-            values = ws.get_all_records()
-            return pd.DataFrame(values) if values else pd.DataFrame()
-        except Exception:
-            return pd.DataFrame()
+            ws = get_or_create_ws(sh, "activity_log", rows=1000, cols=11)
+            values = ws.get_all_values()
+            if values:
+                headers = values[0]
+                rows = values[1:]
+                if rows:
+                    width = len(headers)
+                    normalized_rows = [(r + [""] * width)[:width] for r in rows]
+                    return pd.DataFrame(normalized_rows, columns=headers)
+        except Exception as e:
+            st.session_state.activity_status = f"활동 이력 조회 실패 → 임시 기록 사용: {e}"
+
     if os.path.exists("activity_log.csv"):
         try:
             return pd.read_csv("activity_log.csv")
         except Exception:
             pass
     return pd.DataFrame()
+
 
 # ------------------------- Kakao API --------------------------
 def kakao_headers():
@@ -622,6 +647,90 @@ if st.button("데이터 조회 및 지도 적용", use_container_width=True, typ
         st.error(f"조회/구축 중 오류: {e}")
 
 # ------------------------- Map -------------------------------
+class CadastralToggle(MacroElement):
+    """Small, reliable Leaflet control for the cadastral WMS layer."""
+    _template = Template(r"""
+    {% macro script(this, kwargs) %}
+    (function() {
+        var map = {{ this._parent.get_name() }};
+        var layer = {{ this.layer_name }};
+        if (!map || !layer || map.__solarCadastralToggle) return;
+        map.__solarCadastralToggle = true;
+
+        var Toggle = L.Control.extend({
+            options: { position: 'topright' },
+            onAdd: function(map) {
+                var container = L.DomUtil.create('div', 'leaflet-control leaflet-bar solar-cadastral-toggle');
+                var button = L.DomUtil.create('button', '', container);
+                button.type = 'button';
+                button.innerHTML = '지적도 OFF';
+                button.title = '지적도 켜기 / 끄기';
+                button.style.cssText = 'border:0;background:#fff;padding:6px 8px;font-size:12px;font-weight:700;color:#374151;cursor:pointer;white-space:nowrap;height:32px;';
+
+                function refresh() {
+                    var on = map.hasLayer(layer);
+                    button.innerHTML = on ? '지적도 ON' : '지적도 OFF';
+                    button.style.background = on ? '#eef2ff' : '#fff';
+                    button.style.color = on ? '#4338ca' : '#374151';
+                }
+                L.DomEvent.disableClickPropagation(container);
+                L.DomEvent.disableScrollPropagation(container);
+                L.DomEvent.on(button, 'click', function(e) {
+                    L.DomEvent.stop(e);
+                    if (map.hasLayer(layer)) map.removeLayer(layer);
+                    else map.addLayer(layer);
+                    refresh();
+                });
+                refresh();
+                return container;
+            }
+        });
+        map.addControl(new Toggle());
+    })();
+    {% endmacro %}
+    """)
+    def __init__(self, layer_name):
+        super().__init__()
+        self._name = "CadastralToggle"
+        self.layer_name = layer_name
+
+class MapViewPersistence(MacroElement):
+    """Persist only the browser-side zoom so marker clicks can rerun Python
+    without resetting the user's current zoom level."""
+    _template = Template(r"""
+    {% macro script(this, kwargs) %}
+    (function() {
+        var map = {{ this._parent.get_name() }};
+        var storageKey = {{ this.storage_key | tojson }};
+        if (!map || !storageKey) return;
+        function restore() {
+            try {
+                var saved = parseInt(window.localStorage.getItem(storageKey), 10);
+                if (!isNaN(saved) && saved >= 1 && saved <= 19) {
+                    map.setZoom(saved, {animate:false});
+                }
+            } catch(e) {}
+        }
+        function bind() {
+            try {
+                map.off('zoomend.__solarPersist');
+                map.on('zoomend.__solarPersist', function() {
+                    try { window.localStorage.setItem(storageKey, String(map.getZoom())); } catch(e) {}
+                });
+                restore();
+            } catch(e) {}
+        }
+        bind();
+        setTimeout(bind, 50);
+        setTimeout(bind, 250);
+    })();
+    {% endmacro %}
+    """)
+    def __init__(self, storage_key):
+        super().__init__()
+        self._name = "MapViewPersistence"
+        self.storage_key = storage_key
+
 st.divider()
 st.markdown('<div class="helper-text">안내: 지도 빈 공간을 터치하면 신규 현장을 등록할 수 있습니다.</div>', unsafe_allow_html=True)
 
@@ -681,80 +790,13 @@ cadastral_layer = folium.raster_layers.WmsTileLayer(
     show=False,
 ).add_to(m)
 
-# Small cadastral ON/OFF control. No LayerControl / OSM selector is displayed.
-map_name = m.get_name()
-cadastral_name = cadastral_layer.get_name()
-m.get_root().html.add_child(folium.Element(f"""
-<script>
-(function() {{
-    function installCadastralToggle() {{
-        var map = {map_name};
-        var cadastral = {cadastral_name};
-        if (!map || !cadastral || map.__cadastral_toggle_installed) return;
-        map.__cadastral_toggle_installed = true;
+# Small cadastral ON/OFF control. No OSM selector is displayed.
+CadastralToggle(cadastral_name).add_to(m)
 
-        var ToggleControl = L.Control.extend({{
-            options: {{ position: 'topright' }},
-            onAdd: function(map) {{
-                var container = L.DomUtil.create('div', 'leaflet-control leaflet-bar');
-                container.style.background = '#fff';
-                container.style.borderRadius = '6px';
-                container.style.boxShadow = '0 1px 5px rgba(0,0,0,.35)';
-                container.style.overflow = 'hidden';
-
-                var button = L.DomUtil.create('button', '', container);
-                button.type = 'button';
-                button.innerHTML = '지적도 OFF';
-                button.title = '지적도 켜기/끄기';
-                button.style.border = '0';
-                button.style.background = '#fff';
-                button.style.padding = '7px 9px';
-                button.style.fontSize = '12px';
-                button.style.fontWeight = '600';
-                button.style.color = '#374151';
-                button.style.cursor = 'pointer';
-                button.style.whiteSpace = 'nowrap';
-
-                function updateButton() {{
-                    var on = map.hasLayer(cadastral);
-                    button.innerHTML = on ? '지적도 ON' : '지적도 OFF';
-                    button.style.background = on ? '#eef2ff' : '#fff';
-                    button.style.color = on ? '#4338ca' : '#374151';
-                }}
-
-                L.DomEvent.disableClickPropagation(container);
-                L.DomEvent.on(button, 'click', function(e) {{
-                    L.DomEvent.stop(e);
-                    if (map.hasLayer(cadastral)) {{
-                        map.removeLayer(cadastral);
-                    }} else {{
-                        map.addLayer(cadastral);
-                    }}
-                    updateButton();
-                }});
-
-                updateButton();
-                return container;
-            }}
-        }});
-
-        new ToggleControl().addTo(map);
-    }}
-
-    var tries = 0;
-    var timer = setInterval(function() {{
-        tries += 1;
-        try {{
-            installCadastralToggle();
-            if ({map_name} && {map_name}.__cadastral_toggle_installed) {{
-                clearInterval(timer);
-            }}
-        }} catch (e) {{}}
-        if (tries > 100) clearInterval(timer);
-    }}, 50);
-}})();
-</script>
-"""))
+# Browser-side zoom persistence: no zoom value is returned to Python, so
+# wheel zoom/pan remains fast while marker-click reruns restore the same zoom.
+zoom_storage_key = "solar_mkt_zoom::" + target_tab_name
+MapViewPersistence(zoom_storage_key).add_to(m)
 
 LocateControl(
     position="topleft",
@@ -801,16 +843,21 @@ coord_missing_count = 0
 
 # MarkerCluster reduces browser DOM/Leaflet work when many targets are visible.
 # At zoom 17+ markers are individual so a field user can select a specific site.
-marker_cluster = MarkerCluster(
-    name="현장 핀",
-    options={
-        "disableClusteringAtZoom": 17,
-        "spiderfyOnMaxZoom": True,
-        "showCoverageOnHover": False,
-        "removeOutsideVisibleBounds": True,
-        "animate": False,
-    },
-).add_to(m)
+# A few dozen markers are faster as plain Leaflet markers. Use clustering only
+# when the visible dataset becomes large.
+if len(df_filtered) >= 100:
+    marker_parent = MarkerCluster(
+        name="현장 핀",
+        options={
+            "disableClusteringAtZoom": 17,
+            "spiderfyOnMaxZoom": True,
+            "showCoverageOnHover": False,
+            "removeOutsideVisibleBounds": True,
+            "animate": False,
+        },
+    ).add_to(m)
+else:
+    marker_parent = m
 
 for _, row in df_filtered.iterrows():
     lat = pd.to_numeric(row.get("lat"), errors="coerce")
@@ -830,7 +877,7 @@ for _, row in df_filtered.iterrows():
         tooltip=name,
         popup=folium.Popup(popup, max_width=280),
         icon=folium.Icon(color=color, icon=icon),
-    ).add_to(marker_cluster)
+    ).add_to(marker_parent)
     marker_count += 1
 
 st.caption(f"지도 표시 대상 {len(df_filtered):,}건 · 실제 핀 {marker_count:,}개 · 좌표 없음 {coord_missing_count:,}개")
@@ -1023,11 +1070,26 @@ elif st.session_state.new_pin_coord:
 
 # ------------------------- Daily activity log -----------------
 st.divider()
+if st.session_state.get("activity_status"):
+    status_text = html.escape(str(st.session_state.activity_status))
+    if "실패" in status_text:
+        st.warning(status_text)
+    else:
+        st.caption("📝 " + status_text)
+
 st.markdown('<div class="section-title">일자별 영업일지</div>', unsafe_allow_html=True)
 selected_date = st.date_input("조회 일자 선택", value=datetime.today())
 date_str = selected_date.strftime("%Y-%m-%d")
 
 activity = load_activity_log()
+# Show just-written records immediately even if Google Sheets has a short read delay.
+session_rows = st.session_state.get("activity_rows_session", [])
+if session_rows:
+    session_df = pd.DataFrame(session_rows)
+    activity = pd.concat([activity, session_df], ignore_index=True) if not activity.empty else session_df
+    if "기록일시" in activity.columns:
+        activity = activity.drop_duplicates(subset=[c for c in ["기록일시", "site_id", "행동"] if c in activity.columns], keep="first")
+
 if not activity.empty and "기록일시" in activity.columns:
     activity["기록일시"] = activity["기록일시"].fillna("").astype(str)
     daily = activity[activity["기록일시"].str.startswith(date_str)].copy().sort_values("기록일시")
