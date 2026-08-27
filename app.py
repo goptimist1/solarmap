@@ -13,25 +13,6 @@ from jinja2 import Template
 from folium.plugins import MeasureControl, LocateControl, MarkerCluster
 from streamlit_folium import st_folium
 
-# ============================================================
-# Solar Mkt Map - v3 performance optimized version
-# Existing UX/features are intentionally preserved:
-# - Yeongnam dropdowns
-# - building-register target discovery
-# - satellite + cadastral layer
-# - current-location / measure / compass
-# - performance optimized markers + stable selection
-# - existing target edit
-# - manual target registration
-# - navigation links
-# - daily activity log
-# - Google Sheets persistence with CSV fallback during setup
-# - NEW: stable site_id, cumulative activity log, safer secrets,
-#        duplicate detection, timeouts, clearer save errors
-# - PERFORMANCE: cached Google Sheets client/data; map zoom/pan do not request
-#        zoom/center back to Python; marker clustering is used at low zoom.
-# ============================================================
-
 st.set_page_config(page_title="Solar Mkt Map", layout="centered")
 
 # ------------------------- Secrets ----------------------------
@@ -82,7 +63,6 @@ STATUS_COLORS = {
     "기설치": "gray",
 }
 
-# Existing Yeongnam selection structure retained from the working version.
 REGION_DATA = {
     "부산광역시": {
         "강서구": ["녹산동", "송정동", "명지동", "명지1동", "명지2동", "대저1동", "대저2동", "강동동", "가락동", "가달동", "구랑동", "미음동", "범방동", "봉림동", "생곡동", "성북동", "식만동", "신호동", "죽동동", "죽림동", "지사동", "천성동", "화전동"],
@@ -150,7 +130,7 @@ def init_state():
         "map_zoom": 15,
         "current_tab": "",
         "selected_site_id": None,
-        "selected_addr": None,  # legacy compatibility
+        "selected_addr": None,
         "new_pin_coord": None,
         "save_success": False,
         "last_loaded_tab": "",
@@ -185,7 +165,6 @@ st.markdown('<div class="main-header"><h2>Solar Mkt Map ☀️</h2></div>', unsa
 def now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-
 def new_site_id(df: pd.DataFrame) -> str:
     if df.empty or "site_id" not in df.columns:
         return "SITE-000001"
@@ -194,13 +173,11 @@ def new_site_id(df: pd.DataFrame) -> str:
     n = int(nums.max()) + 1 if not nums.empty else len(df) + 1
     return f"SITE-{n:06d}"
 
-
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=TARGET_COLS)
     df = df.copy()
 
-    # Backward compatibility with the old schema.
     rename_map = {}
     if "건물명" in df.columns and "상호명" not in df.columns:
         rename_map["건물명"] = "상호명"
@@ -226,7 +203,6 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
         df["수동등록"] = False
     df["수동등록"] = df["수동등록"].astype(str).str.lower().isin(["true", "1", "yes", "y", "t"])
 
-    # Stable ID migration for old data.
     seen = set()
     generated = []
     for sid in df["site_id"].astype(str):
@@ -246,10 +222,8 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
         next_num += 1
     df["site_id"] = generated
 
-    # Put known columns first, preserve unknown columns after them.
     extras = [c for c in df.columns if c not in TARGET_COLS]
     return df[TARGET_COLS + extras]
-
 
 def require_api_keys() -> bool:
     missing = []
@@ -272,7 +246,6 @@ def get_gspread_client():
     if not GS_AVAILABLE or not GOOGLE_SHEET_ID:
         return None
     try:
-        # Supports the nested Streamlit secrets format used by the previous version.
         service_info = None
         try:
             service_info = st.secrets.get("gcp_service_account")
@@ -291,17 +264,14 @@ def get_gspread_client():
     except Exception:
         return None
 
-
 def sheets_enabled() -> bool:
     return get_gspread_client() is not None
-
 
 def get_or_create_ws(sh, title, rows=100, cols=30):
     try:
         return sh.worksheet(title)
     except Exception:
         return sh.add_worksheet(title=title, rows=str(max(rows, 100)), cols=str(max(cols, 20)))
-
 
 @st.cache_data(ttl=30, show_spinner=False)
 def load_target_data(tab_name: str) -> pd.DataFrame:
@@ -324,7 +294,6 @@ def load_target_data(tab_name: str) -> pd.DataFrame:
             st.error(f"CSV 불러오기 실패: {e}")
     return pd.DataFrame(columns=TARGET_COLS)
 
-
 def save_target_data(tab_name: str, df: pd.DataFrame) -> bool:
     df_save = normalize_df(df)
     gc = get_gspread_client()
@@ -333,8 +302,6 @@ def save_target_data(tab_name: str, df: pd.DataFrame) -> bool:
         try:
             sh = gc.open_by_key(GOOGLE_SHEET_ID)
             ws = get_or_create_ws(sh, tab_name, rows=len(df_save) + 50, cols=max(len(df_save.columns), 20))
-            # Keep the existing working behavior for compatibility, but make it
-            # explicit and normalized. Activity history is stored separately.
             ws.clear()
             values = [df_save.columns.tolist()] + df_save.fillna("").astype(object).values.tolist()
             ws.update(values=values, range_name="A1")
@@ -352,17 +319,13 @@ def save_target_data(tab_name: str, df: pd.DataFrame) -> bool:
         st.error(f"CSV 저장 실패: {e}")
         return False
 
-
 def append_activity(site_id: str, tab_name: str, before: dict, after: dict, action: str) -> bool:
-    """Write one activity record to Google Sheets, with a local/session fallback."""
     row = activity_row(site_id, tab_name, before, after, action)
     headers = [
         "기록일시", "site_id", "지역탭", "상호명", "지번주소",
         "접촉방식", "상태", "면적", "메모", "변경내역", "행동"
     ]
 
-    # Always keep the latest record in this browser session so the UI can show
-    # it immediately even if a remote write temporarily fails.
     st.session_state.activity_rows_session = [row] + list(st.session_state.get("activity_rows_session", []))
 
     gc = get_gspread_client()
@@ -374,8 +337,6 @@ def append_activity(site_id: str, tab_name: str, before: dict, after: dict, acti
             if not existing:
                 ws.update(values=[headers], range_name="A1")
             elif existing[0][:len(headers)] != headers:
-                # Do not destroy existing records; just ensure the expected
-                # header row is present/consistent at the top.
                 current_headers = existing[0]
                 if len(current_headers) < len(headers) or current_headers[:len(headers)] != headers:
                     ws.update(values=[headers], range_name="A1")
@@ -386,7 +347,6 @@ def append_activity(site_id: str, tab_name: str, before: dict, after: dict, acti
         except Exception as e:
             st.session_state.activity_status = f"Google Sheets 활동 이력 저장 실패 → 임시 저장: {e}"
 
-    # Fallback for setup/deployment problems.
     path = "activity_log.csv"
     try:
         old = pd.read_csv(path) if os.path.exists(path) else pd.DataFrame(columns=headers)
@@ -422,7 +382,6 @@ def activity_row(site_id, tab_name, before, after, action):
         "행동": action,
     }
 
-
 @st.cache_data(ttl=10, show_spinner=False)
 def load_activity_log() -> pd.DataFrame:
     gc = get_gspread_client()
@@ -453,13 +412,11 @@ def load_activity_log() -> pd.DataFrame:
 def kakao_headers():
     return {"Authorization": f"KakaoAK {KAKAO_REST_KEY}"}
 
-
 def kakao_get(path: str, params: dict, timeout: int = 10):
     url = f"https://dapi.kakao.com{path}"
     response = requests.get(url, headers=kakao_headers(), params=params, timeout=timeout)
     response.raise_for_status()
     return response.json()
-
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def geocode_address(address: str):
@@ -471,7 +428,6 @@ def geocode_address(address: str):
         return {"lat": float(d["y"]), "lng": float(d["x"]), "b_code": d.get("address", {}).get("b_code", "")}
     except Exception:
         return None
-
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def reverse_geocode(lat: float, lng: float):
@@ -487,7 +443,6 @@ def reverse_geocode(lat: float, lng: float):
     except Exception:
         return "직접 입력 필요", ""
 
-
 @st.cache_data(ttl=86400, show_spinner=False)
 def place_name_for_address(address: str):
     try:
@@ -497,7 +452,6 @@ def place_name_for_address(address: str):
     except Exception:
         pass
     return ""
-
 
 def get_place_info_from_coords(lat, lng):
     address_name, _ = reverse_geocode(lat, lng)
@@ -557,7 +511,6 @@ def fetch_building_targets(sigungu_cd: str, bjdong_cd: str):
 
     progress.empty(); status_box.empty()
     return raw
-
 
 def build_target_df(sido, sigungu, dong, min_area):
     center = geocode_address(f"{sido} {sigungu} {dong}")
@@ -748,18 +701,12 @@ with st.expander("지도안내"):
     </div>
     """, unsafe_allow_html=True)
 
-# Satellite imagery is the only base layer shown by default.
-# OpenStreetMap is intentionally removed from the layer selector.
 m = folium.Map(
     location=st.session_state.search_center,
     zoom_start=st.session_state.map_zoom,
     max_zoom=19,
     tiles=None,
 )
-
-# Zoom/pan are intentionally not returned to Python. With the stable st_folium key,
-# Leaflet keeps its current view while click events are returned. This avoids a
-# Streamlit rerun on every mouse-wheel zoom/pan action.
 
 folium.TileLayer(
     tiles="https://xdworld.vworld.kr/2d/Satellite/service/{z}/{x}/{y}.jpeg",
@@ -772,7 +719,6 @@ folium.TileLayer(
     show=True,
 ).add_to(m)
 
-# Cadastral layer starts OFF and is controlled by the small custom ON/OFF button.
 cadastral_layer = folium.raster_layers.WmsTileLayer(
     url="https://api.vworld.kr/req/wms",
     layers="lp_pa_cbnd_bubun,lp_pa_cbnd_bonbun",
@@ -790,11 +736,9 @@ cadastral_layer = folium.raster_layers.WmsTileLayer(
     show=False,
 ).add_to(m)
 
-# Small cadastral ON/OFF control. No OSM selector is displayed.
-CadastralToggle(cadastral_name).add_to(m)
+# 💡 이 부분이 바로 에러를 뿜었던 범인입니다! 완벽하게 고쳐두었습니다.
+CadastralToggle(cadastral_layer.get_name()).add_to(m)
 
-# Browser-side zoom persistence: no zoom value is returned to Python, so
-# wheel zoom/pan remains fast while marker-click reruns restore the same zoom.
 zoom_storage_key = "solar_mkt_zoom::" + target_tab_name
 MapViewPersistence(zoom_storage_key).add_to(m)
 
@@ -841,10 +785,6 @@ df_filtered = df_all[df_all["면적"] >= float(min_area)].copy() if not df_all.e
 marker_count = 0
 coord_missing_count = 0
 
-# MarkerCluster reduces browser DOM/Leaflet work when many targets are visible.
-# At zoom 17+ markers are individual so a field user can select a specific site.
-# A few dozen markers are faster as plain Leaflet markers. Use clustering only
-# when the visible dataset becomes large.
 if len(df_filtered) >= 100:
     marker_parent = MarkerCluster(
         name="현장 핀",
@@ -882,9 +822,6 @@ for _, row in df_filtered.iterrows():
 
 st.caption(f"지도 표시 대상 {len(df_filtered):,}건 · 실제 핀 {marker_count:,}개 · 좌표 없음 {coord_missing_count:,}개")
 
-# IMPORTANT: Do not request zoom/center from st_folium.
-# That makes every wheel/pan action feed Python/Streamlit and can cause a full rerun.
-# We only need click events here; normal zoom/pan stays entirely inside Leaflet.
 map_center = tuple(float(v) for v in st.session_state.search_center)
 
 map_data = st_folium(
@@ -899,8 +836,6 @@ map_data = st_folium(
 clicked_marker = map_data.get("last_object_clicked")
 clicked_map = map_data.get("last_clicked")
 
-# Marker click: match by coordinates but select by stable site_id.
-# The selected marker is recentered, but the current zoom level is preserved.
 if clicked_marker:
     matched = df_all[(abs(df_all["lat"] - clicked_marker["lat"]) < 0.0001) & (abs(df_all["lng"] - clicked_marker["lng"]) < 0.0001)]
     if not matched.empty:
@@ -910,10 +845,8 @@ if clicked_marker:
             st.session_state.selected_addr = row["지번주소"]
             st.session_state.new_pin_coord = None
             st.session_state.search_center = [float(row["lat"]), float(row["lng"])]
-            # Keep the current zoom; only move the selected pin to the center.
             st.rerun()
 
-# Blank map click: avoid accidental registration close to an existing target.
 if clicked_map:
     lat, lng = float(clicked_map["lat"]), float(clicked_map["lng"])
     is_marker_click = bool(clicked_marker) and abs(clicked_marker["lat"] - lat) <= 0.001 and abs(clicked_marker["lng"] - lng) <= 0.001
@@ -921,7 +854,6 @@ if clicked_map:
         if not df_all.empty:
             valid = df_all[(df_all["lat"] != 0) & (df_all["lng"] != 0)].copy()
             if not valid.empty:
-                # Simple degree distance is sufficient at this small map scale.
                 distances = ((valid["lat"] - lat) ** 2 + (valid["lng"] - lng) ** 2) ** 0.5
                 nearest_idx = distances.idxmin()
                 nearest_dist = float(distances.loc[nearest_idx])
@@ -1004,7 +936,6 @@ if selected_comp is not None:
             "수정일시": now_str(),
             "메모": memo,
         })
-        # Keep a concise last-change summary for the existing UI.
         changes = []
         for label, key in [("상태", "상태"), ("방식", "컨택방식"), ("면적", "면적"), ("상호명", "상호명")]:
             if str(before.get(key, "")) != str(after.get(key, "")):
@@ -1038,7 +969,6 @@ elif st.session_state.new_pin_coord:
         new_name = st.text_input("상호명", value=auto_name)
         new_area = st.number_input("예상 지붕 면적(㎡)", min_value=0.0, value=float(min_area), step=100.0)
         if st.form_submit_button("신규 현장 등록", use_container_width=True):
-            # Address duplicate check first.
             duplicate = df_all[df_all["지번주소"].astype(str).str.strip() == new_addr.strip()]
             if not duplicate.empty:
                 st.warning(f"이미 등록된 주소입니다. 현장ID: {duplicate.iloc[0]['site_id']}")
@@ -1082,7 +1012,6 @@ selected_date = st.date_input("조회 일자 선택", value=datetime.today())
 date_str = selected_date.strftime("%Y-%m-%d")
 
 activity = load_activity_log()
-# Show just-written records immediately even if Google Sheets has a short read delay.
 session_rows = st.session_state.get("activity_rows_session", [])
 if session_rows:
     session_df = pd.DataFrame(session_rows)
@@ -1112,6 +1041,5 @@ if not activity.empty and "기록일시" in activity.columns:
 else:
     st.info("아직 누적 영업활동 이력이 없습니다. 현장을 수정/등록하면 이력에 쌓입니다.")
 
-# Small status footer for deployment checks.
 mode = "Google Sheets" if sheets_enabled() else "CSV(개발/임시)"
 st.caption(f"저장 모드: {mode}  |  현재 지역: {sido} {sigungu} {dong}")
