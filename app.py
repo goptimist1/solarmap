@@ -8,7 +8,7 @@ import requests
 import streamlit as st
 import folium
 from folium.plugins import MeasureControl, LocateControl, MarkerCluster
-from streamlit_folium import st_folium
+from streamlit_folium import st_folium, folium_static
 
 # ============================================================
 # Solar Mkt Map - improved production-oriented version
@@ -687,7 +687,8 @@ for _, row in df_filtered.iterrows():
         icon=folium.Icon(color=color, icon=icon),
     ).add_to(marker_cluster)
 
-map_data = st_folium(m, width="100%", height=450, returned_objects=["last_object_clicked", "last_clicked"])
+folium_static(m, width=700, height=450)
+map_data = {}
 clicked_marker = map_data.get("last_object_clicked")
 clicked_map = map_data.get("last_clicked")
 
