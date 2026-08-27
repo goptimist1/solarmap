@@ -14,7 +14,7 @@ from folium.plugins import MeasureControl, LocateControl, MarkerCluster
 from streamlit_folium import st_folium
 
 # ============================================================
-# Solar Mkt Map - v5 (DB Update + Activity Log Safe Concat Fix)
+# Solar Mkt Map - v6 (Vertical Log Fix + Form Performance Optimization)
 # ============================================================
 
 st.set_page_config(page_title="Solar Mkt Map", layout="centered")
@@ -321,6 +321,7 @@ def save_target_data(tab_name: str, df: pd.DataFrame) -> bool:
         st.error(f"CSV 저장 실패: {e}")
         return False
 
+# 💡 핵심 수정: 오른쪽으로 늘어나지 않고 A2, A3... 순서대로 아래로 정확히 쌓이게 개선!
 def append_activity(site_id: str, tab_name: str, before: dict, after: dict, action: str) -> bool:
     row = activity_row(site_id, tab_name, before, after, action)
     headers = ["기록일시", "site_id", "지역탭", "상호명", "지번주소", "접촉방식", "상태", "면적", "메모", "변경내역", "행동"]
@@ -332,13 +333,16 @@ def append_activity(site_id: str, tab_name: str, before: dict, after: dict, acti
             sh = gc.open_by_key(GOOGLE_SHEET_ID)
             ws = get_or_create_ws(sh, "activity_log", rows=1000, cols=len(headers))
             existing = ws.get_all_values()
-            if not existing:
+            
+            if not existing or not existing[0]:
                 ws.update(values=[headers], range_name="A1")
-            elif existing[0][:len(headers)] != headers:
-                current_headers = existing[0]
-                if len(current_headers) < len(headers) or current_headers[:len(headers)] != headers:
-                    ws.update(values=[headers], range_name="A1")
-            ws.append_row([row.get(h, "") for h in headers], value_input_option="USER_ENTERED")
+                next_row = 2
+            else:
+                next_row = len(existing) + 1
+                
+            row_vals = [str(row.get(h, "")) for h in headers]
+            # append_row 대신 특정 A열 위치를 정확히 지정하여 아래로 저장
+            ws.update(values=[row_vals], range_name=f"A{next_row}")
             load_activity_log.clear()
             st.session_state.activity_status = "Google Sheets 활동 이력 저장 완료"
             return True
@@ -915,64 +919,62 @@ if selected_comp is not None:
     with c3: st.link_button("티맵(App)", f"tmap://search?name={encoded_addr}", use_container_width=True)
 
     st.divider()
-    edited_name = st.text_input("상호명 (간판 기준)", value=str(comp.get("상호명", "")), key=f"edit_name_{comp['site_id']}")
-    edited_area = st.number_input("지붕 실측 면적(㎡)", min_value=0.0, value=float(comp.get("면적", 0.0)), step=50.0, key=f"edit_area_{comp['site_id']}")
 
-    is_installed = st.checkbox("태양광 기설치 완료 (또는 불가 현장)", value=str(comp.get("상태", "")) == "기설치", key=f"installed_{comp['site_id']}")
-    current_method = str(comp.get("컨택방식", "미진행"))
-    if current_method in METHOD_OPTIONS:
-        method_idx = METHOD_OPTIONS.index(current_method)
-        custom_val = ""
-    else:
-        method_idx = METHOD_OPTIONS.index("기타")
-        custom_val = current_method
-    selected_contact = st.radio("컨택방식", METHOD_OPTIONS, index=method_idx, horizontal=True, key=f"method_{comp['site_id']}")
-    final_method = selected_contact
-    if selected_contact == "기타":
-        final_method = st.text_input("기타 방식 입력", value=custom_val, placeholder="예: 우편, 지인 소개 등", key=f"custom_{comp['site_id']}").strip() or "기타"
+    # 💡 핵심 수정: 전체 수정 입력을 폼(Form)으로 묶어 버튼/라디오 클릭 시 화면 깜빡임/로딩 완벽 제거!
+    with st.form(key=f"edit_form_{comp['site_id']}"):
+        edited_name = st.text_input("상호명 (간판 기준)", value=str(comp.get("상호명", "")))
+        edited_area = st.number_input("지붕 실측 면적(㎡)", min_value=0.0, value=float(comp.get("면적", 0.0)), step=50.0)
 
-    if selected_contact == "미진행":
-        final_status = "기설치" if is_installed else "미컨택"
-    else:
-        contact_status_options = [x for x in STATUS_OPTIONS if x not in ("미컨택", "기설치")]
-        current_status = str(comp.get("상태", "협의중"))
-        status_idx = contact_status_options.index(current_status) if current_status in contact_status_options else 0
-        chosen_status = st.radio("상세 단계", contact_status_options, index=status_idx, horizontal=True, key=f"status_{comp['site_id']}")
-        final_status = "기설치" if is_installed else chosen_status
+        is_installed = st.checkbox("태양광 기설치 완료 (또는 불가 현장)", value=str(comp.get("상태", "")) == "기설치")
 
-    memo = st.text_area("현장 특이사항 및 미팅 노트", value=str(comp.get("메모", "")), key=f"memo_{comp['site_id']}")
+        current_method = str(comp.get("컨택방식", "미진행"))
+        method_idx = METHOD_OPTIONS.index(current_method) if current_method in METHOD_OPTIONS else METHOD_OPTIONS.index("기타")
+        selected_contact = st.radio("컨택방식", METHOD_OPTIONS, index=method_idx, horizontal=True)
+        custom_method = st.text_input("기타 컨택방식 (기타 선택 시 입력)", value=current_method if current_method not in METHOD_OPTIONS else "", placeholder="예: 우편, 지인 소개 등")
 
-    if st.button("변경사항 저장", use_container_width=True, type="primary", key=f"save_{comp['site_id']}"):
-        before = comp.to_dict()
-        after = before.copy()
-        after.update({
-            "상호명": edited_name.strip(),
-            "면적": float(edited_area),
-            "컨택방식": final_method,
-            "상태": final_status,
-            "수정일시": now_str(),
-            "메모": memo,
-        })
-        changes = []
-        for label, key in [("상태", "상태"), ("방식", "컨택방식"), ("면적", "면적"), ("상호명", "상호명")]:
-            if str(before.get(key, "")) != str(after.get(key, "")):
-                changes.append(f"{label}({before.get(key,'')}→{after.get(key,'')})")
-        if str(before.get("메모", "")).strip() != str(after.get("메모", "")).strip():
-            changes.append("메모수정")
-        after["최근수정내역"] = " | ".join(changes) if changes else "단순열람(수정없음)"
+        current_status = str(comp.get("상태", "미컨택"))
+        status_opts = STATUS_OPTIONS
+        status_idx = status_opts.index(current_status) if current_status in status_opts else 0
+        chosen_status = st.radio("영업 상세 단계", status_opts, index=status_idx, horizontal=True)
 
-        updated = df_all.copy()
-        mask = updated["site_id"] == comp["site_id"]
-        for key, value in after.items():
-            if key in updated.columns:
-                updated.loc[mask, key] = value
-        updated = normalize_df(updated)
+        memo = st.text_area("현장 특이사항 및 미팅 노트", value=str(comp.get("메모", "")))
 
-        if save_target_data(st.session_state.current_tab, updated):
-            append_activity(comp["site_id"], st.session_state.current_tab, before, after, "수정")
-            st.session_state.target_data = updated
-            st.session_state.save_success = True
-            st.rerun()
+        submitted = st.form_submit_button("변경사항 저장", use_container_width=True, type="primary")
+
+        if submitted:
+            final_method = custom_method.strip() if selected_contact == "기타" and custom_method.strip() else selected_contact
+            final_status = "기설치" if is_installed else chosen_status
+
+            before = comp.to_dict()
+            after = before.copy()
+            after.update({
+                "상호명": edited_name.strip(),
+                "면적": float(edited_area),
+                "컨택방식": final_method,
+                "상태": final_status,
+                "수정일시": now_str(),
+                "메모": memo,
+            })
+            changes = []
+            for label, key in [("상태", "상태"), ("방식", "컨택방식"), ("면적", "면적"), ("상호명", "상호명")]:
+                if str(before.get(key, "")) != str(after.get(key, "")):
+                    changes.append(f"{label}({before.get(key,'')}→{after.get(key,'')})")
+            if str(before.get("메모", "")).strip() != str(after.get("메모", "")).strip():
+                changes.append("메모수정")
+            after["최근수정내역"] = " | ".join(changes) if changes else "단순열람(수정없음)"
+
+            updated = df_all.copy()
+            mask = updated["site_id"] == comp["site_id"]
+            for key, value in after.items():
+                if key in updated.columns:
+                    updated.loc[mask, key] = value
+            updated = normalize_df(updated)
+
+            if save_target_data(st.session_state.current_tab, updated):
+                append_activity(comp["site_id"], st.session_state.current_tab, before, after, "수정")
+                st.session_state.target_data = updated
+                st.session_state.save_success = True
+                st.rerun()
 
 # ------------------------- New target -------------------------
 elif st.session_state.new_pin_coord:
@@ -1030,7 +1032,6 @@ date_str = selected_date.strftime("%Y-%m-%d")
 
 activity = load_activity_log()
 
-# 💡 중복된 열(Column)이 있으면 합칠 때 에러가 나므로, 중복 열을 제거하는 방어 코드 추가!
 if not activity.empty:
     activity = activity.loc[:, ~activity.columns.duplicated()].copy()
 
