@@ -15,6 +15,9 @@ KAKAO_REST_KEY = "f75505b4b7997750a587e104d87e89d3"
 DATA_GO_KR_KEY = "ed720b69db88e9ae1a1b9779fadafa0ef967945a71407b7d3f1a22d56667461a"
 VWORLD_KEY = "E15629E8-E82E-3C3C-BCA4-40C188FF3935"
 
+# 상준님의 실제 클라우드타입 주소가 완벽하게 적용되었습니다!
+VWORLD_DOMAIN = "https://port-0-solarmap-mtatayuj7b3bb02b.sel3.cloudtype.app" 
+
 try:
     import gspread
     from google.oauth2.service_account import Credentials
@@ -53,7 +56,6 @@ def load_target_data(tab_name):
             df = pd.read_csv(filename)
             
     if not df.empty:
-        # 💡 [자동 호환 로직] 과거에 쓰던 상태 명칭들을 새 버전에 맞게 일괄 변환
         df['상태'] = df['상태'].replace({
             '미개척': '미컨택',
             '거절': '거절/보류',
@@ -396,7 +398,7 @@ folium.raster_layers.WmsTileLayer(
     transparent=True,
     version="1.3.0",
     key=VWORLD_KEY,
-    domain="http://localhost:8501",
+    domain=VWORLD_DOMAIN,  # 💡 [핵심 수정] 하드코딩된 주소 대신 변수 적용됨
     attr="VWorld Cadastral",
     name="지적도(지번경계)",
     overlay=True,
@@ -451,7 +453,6 @@ custom_css = """
 """
 m.get_root().header.add_child(folium.Element(custom_css))
 
-# 💡 [신규 컬러맵 적용]
 color_map = {
     "미컨택": "red", 
     "거절/보류": "orange",
@@ -579,7 +580,6 @@ if show_marker_info and selected_comp is not None:
     
     st.divider()
     
-    # 💡 [핵심 구조 변경] 동적 UI 구동을 위해 st.form 대신 일반 컨테이너로 교체
     with st.container():
         st.markdown('<div style="border: 1px solid #e5e7eb; border-radius: 12px; padding: 24px; background-color: #ffffff; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);">', unsafe_allow_html=True)
         
@@ -593,7 +593,6 @@ if show_marker_info and selected_comp is not None:
         
         st.markdown('<div style="font-weight: 600; color: #111827; margin-top: 15px; margin-bottom: 10px;">영업 현황 기록</div>', unsafe_allow_html=True)
         
-        # 💡 [동적 UI 로직] Contact 선택에 따라 뷰가 달라집니다.
         method_options = ["미진행", "전화", "이메일", "방문", "기타"]
         current_method = comp.get('컨택방식', '미진행')
         
@@ -612,7 +611,6 @@ if show_marker_info and selected_comp is not None:
             if not final_contact_method.strip():
                 final_contact_method = "기타"
 
-        # Contact 방식이 미진행이 아닐 때만 상세 단계를 노출합니다.
         contact_result = "미컨택"
         if selected_contact != "미진행":
             status_options = ["거절/보류", "협의중", "승낙서수령", "계약완료"]
