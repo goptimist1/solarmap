@@ -17,7 +17,7 @@ from streamlit_folium import st_folium
 # - building-register target discovery
 # - satellite + cadastral layer
 # - current-location / measure / compass
-# - marker clustering
+# - stable map markers (no clustering, so marker selection keeps the current zoom)
 # - existing target edit
 # - manual target registration
 # - navigation links
@@ -630,23 +630,136 @@ with st.expander("지도안내"):
     </div>
     """, unsafe_allow_html=True)
 
-m = folium.Map(location=st.session_state.search_center, zoom_start=st.session_state.map_zoom, max_zoom=19, tiles="OpenStreetMap")
+# Satellite imagery is the only base layer shown by default.
+# OpenStreetMap is intentionally removed from the layer selector.
+m = folium.Map(
+    location=st.session_state.search_center,
+    zoom_start=st.session_state.map_zoom,
+    max_zoom=19,
+    tiles=None,
+)
+
 folium.TileLayer(
     tiles="https://xdworld.vworld.kr/2d/Satellite/service/{z}/{x}/{y}.jpeg",
-    attr="VWorld", name="위성지도", max_zoom=19, max_native_zoom=18, control=True, overlay=False, show=True
+    attr="VWorld",
+    name="위성지도",
+    max_zoom=19,
+    max_native_zoom=18,
+    overlay=False,
+    control=False,
+    show=True,
 ).add_to(m)
-folium.raster_layers.WmsTileLayer(
+
+# Cadastral layer starts OFF and is controlled by the small custom ON/OFF button.
+cadastral_layer = folium.raster_layers.WmsTileLayer(
     url="https://api.vworld.kr/req/wms",
     layers="lp_pa_cbnd_bubun,lp_pa_cbnd_bonbun",
     styles="lp_pa_cbnd_bubun,lp_pa_cbnd_bonbun",
-    format="image/png", transparent=True, version="1.3.0",
-    key=VWORLD_KEY, domain=VWORLD_DOMAIN,
-    attr="VWorld Cadastral", name="지적도(지번경계)", overlay=True,
-    control=True, opacity=0.6, show=False
+    format="image/png",
+    transparent=True,
+    version="1.3.0",
+    key=VWORLD_KEY,
+    domain=VWORLD_DOMAIN,
+    attr="VWorld Cadastral",
+    name="지적도(지번경계)",
+    overlay=True,
+    control=False,
+    opacity=0.6,
+    show=False,
 ).add_to(m)
-folium.LayerControl(position="topright", collapsed=False).add_to(m)
-LocateControl(position="topleft", strings={"title":"내 위치 확인", "popup":"현재 위치"}, drawCircle=True, showPopup=False, keepCurrentZoomLevel=False).add_to(m)
-m.add_child(MeasureControl(position="topright", primary_length_unit="meters", secondary_length_unit=None, primary_area_unit="sqmeters", secondary_area_unit=None))
+
+# Small cadastral ON/OFF control. No LayerControl / OSM selector is displayed.
+map_name = m.get_name()
+cadastral_name = cadastral_layer.get_name()
+m.get_root().html.add_child(folium.Element(f"""
+<script>
+(function() {{
+    function installCadastralToggle() {{
+        var map = {map_name};
+        var cadastral = {cadastral_name};
+        if (!map || !cadastral || map.__cadastral_toggle_installed) return;
+        map.__cadastral_toggle_installed = true;
+
+        var ToggleControl = L.Control.extend({{
+            options: {{ position: 'topright' }},
+            onAdd: function(map) {{
+                var container = L.DomUtil.create('div', 'leaflet-control leaflet-bar');
+                container.style.background = '#fff';
+                container.style.borderRadius = '6px';
+                container.style.boxShadow = '0 1px 5px rgba(0,0,0,.35)';
+                container.style.overflow = 'hidden';
+
+                var button = L.DomUtil.create('button', '', container);
+                button.type = 'button';
+                button.innerHTML = '지적도 OFF';
+                button.title = '지적도 켜기/끄기';
+                button.style.border = '0';
+                button.style.background = '#fff';
+                button.style.padding = '7px 9px';
+                button.style.fontSize = '12px';
+                button.style.fontWeight = '600';
+                button.style.color = '#374151';
+                button.style.cursor = 'pointer';
+                button.style.whiteSpace = 'nowrap';
+
+                function updateButton() {{
+                    var on = map.hasLayer(cadastral);
+                    button.innerHTML = on ? '지적도 ON' : '지적도 OFF';
+                    button.style.background = on ? '#eef2ff' : '#fff';
+                    button.style.color = on ? '#4338ca' : '#374151';
+                }}
+
+                L.DomEvent.disableClickPropagation(container);
+                L.DomEvent.on(button, 'click', function(e) {{
+                    L.DomEvent.stop(e);
+                    if (map.hasLayer(cadastral)) {{
+                        map.removeLayer(cadastral);
+                    }} else {{
+                        map.addLayer(cadastral);
+                    }}
+                    updateButton();
+                }});
+
+                updateButton();
+                return container;
+            }}
+        }});
+
+        new ToggleControl().addTo(map);
+    }}
+
+    var tries = 0;
+    var timer = setInterval(function() {{
+        tries += 1;
+        try {{
+            installCadastralToggle();
+            if ({map_name} && {map_name}.__cadastral_toggle_installed) {{
+                clearInterval(timer);
+            }}
+        }} catch (e) {{}}
+        if (tries > 100) clearInterval(timer);
+    }}, 50);
+}})();
+</script>
+"""))
+
+LocateControl(
+    position="topleft",
+    strings={"title": "내 위치 확인", "popup": "현재 위치"},
+    drawCircle=True,
+    showPopup=False,
+    keepCurrentZoomLevel=True,
+).add_to(m)
+
+m.add_child(
+    MeasureControl(
+        position="topright",
+        primary_length_unit="meters",
+        secondary_length_unit=None,
+        primary_area_unit="sqmeters",
+        secondary_area_unit=None,
+    )
+)
 
 compass_html = """
 <div style="position:absolute;top:120px;left:11px;z-index:1000;background:rgba(255,255,255,.9);padding:4px;border-radius:6px;border:2px solid rgba(0,0,0,.2);box-shadow:0 1px 4px rgba(0,0,0,.3);width:32px;height:32px;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none;">
@@ -696,11 +809,30 @@ for _, row in df_filtered.iterrows():
 
 st.caption(f"지도 표시 대상 {len(df_filtered):,}건 · 실제 핀 {marker_count:,}개 · 좌표 없음 {coord_missing_count:,}개")
 
-map_data = st_folium(m, width="100%", height=450, returned_objects=["last_object_clicked", "last_clicked"])
+map_data = st_folium(
+    m,
+    width="100%",
+    height=450,
+    returned_objects=["last_object_clicked", "last_clicked", "zoom", "center"],
+    key="solar_mkt_map",
+)
+
 clicked_marker = map_data.get("last_object_clicked")
 clicked_map = map_data.get("last_clicked")
 
+# Keep the user's current zoom level across Streamlit reruns.
+# This prevents marker selection from jumping back to the default zoom.
+current_zoom = map_data.get("zoom")
+if current_zoom is not None:
+    try:
+        current_zoom = int(round(float(current_zoom)))
+        if 1 <= current_zoom <= 19:
+            st.session_state.map_zoom = current_zoom
+    except (TypeError, ValueError):
+        pass
+
 # Marker click: match by coordinates but select by stable site_id.
+# The selected marker is recentered, but the current zoom level is preserved.
 if clicked_marker:
     matched = df_all[(abs(df_all["lat"] - clicked_marker["lat"]) < 0.0001) & (abs(df_all["lng"] - clicked_marker["lng"]) < 0.0001)]
     if not matched.empty:
@@ -710,6 +842,7 @@ if clicked_marker:
             st.session_state.selected_addr = row["지번주소"]
             st.session_state.new_pin_coord = None
             st.session_state.search_center = [float(row["lat"]), float(row["lng"])]
+            # Keep the current zoom; only move the selected pin to the center.
             st.rerun()
 
 # Blank map click: avoid accidental registration close to an existing target.
