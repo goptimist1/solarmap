@@ -14,7 +14,7 @@ from folium.plugins import MeasureControl, LocateControl, MarkerCluster
 from streamlit_folium import st_folium
 
 # ============================================================
-# Solar Mkt Map - v4 (DB Update Expansion & Safe Parsing)
+# Solar Mkt Map - v5 (DB Update + Activity Log Safe Concat Fix)
 # ============================================================
 
 st.set_page_config(page_title="Solar Mkt Map", layout="centered")
@@ -202,7 +202,6 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = 0.0
         else:
-            # 엑셀에서 콤마(,)가 포함된 채로 저장되었을 경우를 대비한 안전망
             if df[col].dtype == object or str(df[col].dtype) == 'string':
                 df[col] = df[col].astype(str).str.replace(",", "", regex=False)
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
@@ -528,10 +527,7 @@ def build_target_df(sido, sigungu, dong, min_area, existing_df=None):
         "건물명": lambda x: ", ".join(sorted(set(filter(None, x)))),
     })
     
-    # 설정한 면적 이상인 타겟만 필터링
     filtered = grouped[grouped["건축면적(㎡)"] >= float(min_area)].copy()
-    
-    # 이미 기존 DB(엑셀)에 들어있는 주소는 또 API를 부르지 않도록 제외합니다 (영업이력 보호)
     new_targets = filtered[~filtered["지번주소"].astype(str).str.strip().isin(existing_addrs)]
     
     if new_targets.empty:
@@ -564,7 +560,6 @@ def build_target_df(sido, sigungu, dong, min_area, existing_df=None):
     
     if rows:
         new_df = pd.DataFrame(rows)
-        # 기존 데이터와 신규 데이터를 합치고 정규화(ID 부여 등)
         combined = pd.concat([base_df, new_df], ignore_index=True)
         combined = normalize_df(combined)
         return combined, center
@@ -583,7 +578,6 @@ with col3:
 
 min_area = st.number_input("최소 건축면적 (㎡)", min_value=100, value=5000, step=500)
 
-# 핵심! DB 강제 업데이트 체크박스 추가
 update_db = st.checkbox("🔄 새로운 면적 조건으로 DB 데이터 추가 수집 (기존 영업이력은 안전하게 유지됩니다)", value=False)
 target_tab_name = f"target_{sido}_{sigungu}_{dong}"
 
@@ -803,7 +797,6 @@ m.get_root().header.add_child(folium.Element("""
 df_all = normalize_df(st.session_state.target_data)
 st.session_state.target_data = df_all
 
-# 현재 설정된 최소면적 이상인 것만 '지도'에 표시합니다.
 df_filtered = df_all[df_all["면적"] >= float(min_area)].copy() if not df_all.empty else df_all
 
 marker_count = 0
@@ -1036,10 +1029,19 @@ selected_date = st.date_input("조회 일자 선택", value=datetime.today())
 date_str = selected_date.strftime("%Y-%m-%d")
 
 activity = load_activity_log()
+
+# 💡 중복된 열(Column)이 있으면 합칠 때 에러가 나므로, 중복 열을 제거하는 방어 코드 추가!
+if not activity.empty:
+    activity = activity.loc[:, ~activity.columns.duplicated()].copy()
+
 session_rows = st.session_state.get("activity_rows_session", [])
 if session_rows:
     session_df = pd.DataFrame(session_rows)
+    if not session_df.empty:
+        session_df = session_df.loc[:, ~session_df.columns.duplicated()].copy()
+        
     activity = pd.concat([activity, session_df], ignore_index=True) if not activity.empty else session_df
+    
     if "기록일시" in activity.columns:
         activity = activity.drop_duplicates(subset=[c for c in ["기록일시", "site_id", "행동"] if c in activity.columns], keep="first")
 
