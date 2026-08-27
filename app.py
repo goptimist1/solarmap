@@ -630,7 +630,7 @@ with st.expander("지도안내"):
     </div>
     """, unsafe_allow_html=True)
 
-m = folium.Map(location=st.session_state.search_center, zoom_start=st.session_state.map_zoom, max_zoom=19, tiles=None)
+m = folium.Map(location=st.session_state.search_center,zoom_start=st.session_state.map_zoom,max_zoom=19,tiles="OpenStreetMap")
 folium.TileLayer(
     tiles="https://xdworld.vworld.kr/2d/Satellite/service/{z}/{x}/{y}.jpeg",
     attr="VWorld", name="위성지도", max_zoom=19, max_native_zoom=18, control=False
