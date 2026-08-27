@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 import folium
-from folium.plugins import MeasureControl, LocateControl
+from folium.plugins import MeasureControl, LocateControl, MarkerCluster
 from streamlit_folium import st_folium
 import os
 import urllib.parse
@@ -15,7 +15,7 @@ KAKAO_REST_KEY = "f75505b4b7997750a587e104d87e89d3"
 DATA_GO_KR_KEY = "ed720b69db88e9ae1a1b9779fadafa0ef967945a71407b7d3f1a22d56667461a"
 VWORLD_KEY = "E15629E8-E82E-3C3C-BCA4-40C188FF3935"
 
-# 상준님의 실제 클라우드타입 주소가 완벽하게 적용되었습니다!
+# 상준님의 실제 클라우드타입 서비스 주소
 VWORLD_DOMAIN = "https://port-0-solarmap-mtatayuj7b3bb02b.sel3.cloudtype.app" 
 
 try:
@@ -108,7 +108,7 @@ def save_target_data(tab_name, df):
 # ----------------------------------------------------
 # 📱 2. 모바일 최적화 화면 설정 및 커스텀 CSS
 # ----------------------------------------------------
-st.set_page_config(page_title="태양광 영업관리Sys.", layout="centered")
+st.set_page_config(page_title="Solar Mkt Map", layout="centered")
 
 custom_ui_css = """
 <style>
@@ -153,8 +153,8 @@ custom_ui_css = """
     .main-header h2 {
         margin: 0;
         color: #111827;
-        font-size: 1.4rem;
-        font-weight: 700;
+        font-size: 1.6rem;
+        font-weight: 800;
         letter-spacing: -0.5px;
     }
     .section-title {
@@ -180,7 +180,7 @@ if st.session_state.get('save_success', False):
 
 st.markdown("""
 <div class="main-header">
-    <h2>태양광 영업관리Sys.</h2>
+    <h2>Solar Mkt Map ☀️</h2>
 </div>
 """, unsafe_allow_html=True)
 
@@ -226,21 +226,76 @@ def get_place_info_from_coords(lat, lng):
     return address_name, building_name
 
 # ----------------------------------------------------
-# 🔍 3. 검색 조건 설정 
+# 🔍 3. 검색 조건 설정 (영남권 풀 드롭다운 모드)
 # ----------------------------------------------------
 st.markdown('<div class="section-title">타겟 지역 및 조건 설정</div>', unsafe_allow_html=True)
 
 region_data = {
     "부산광역시": {
-        "강서구": ["녹산동", "송정동", "명지동", "대저1동", "대저2동", "강동동"],
-        "사하구": ["신평동", "장림동", "다대동"]
+        "강서구": ["녹산동", "송정동", "명지동", "명지1동", "명지2동", "대저1동", "대저2동", "강동동", "가락동", "가달동", "구랑동", "미음동", "범방동", "봉림동", "생곡동", "성북동", "식만동", "신호동", "죽동동", "죽림동", "지사동", "천성동", "화전동"],
+        "기장군": ["기장읍", "장안읍", "정관읍", "일광읍", "철마면"],
+        "남구": ["대연동", "용호동", "용당동", "문현동", "우암동", "감만동"],
+        "동구": ["초량동", "수정동", "좌천동", "범일동"],
+        "동래구": ["수민동", "복산동", "명륜동", "온천동", "사직동", "안락동", "명장동"],
+        "부산진구": ["부전동", "연지동", "초읍동", "양정동", "전포동", "부암동", "당감동", "가야동", "개금동", "범천동"],
+        "북구": ["구포동", "금곡동", "화명동", "덕천동", "만덕동"],
+        "사상구": ["삼락동", "모라동", "덕포동", "괘법동", "감전동", "주례동", "학장동", "엄궁동"],
+        "사하구": ["괴정동", "당리동", "하단동", "신평동", "장림동", "다대동", "구평동", "감천동"],
+        "서구": ["동대신동", "서대신동", "부민동", "아미동", "초장동", "충무동", "남부민동", "암남동"],
+        "수영구": ["남천동", "수영동", "망미동", "광안동", "민락동"],
+        "연제구": ["거제동", "연산동"],
+        "영도구": ["남항동", "영선동", "신선동", "봉래동", "청학동", "동삼동"],
+        "중구": ["중앙동", "동광동", "대청동", "보수동", "부평동", "광복동", "남포동", "영주동"],
+        "해운대구": ["우동", "중동", "좌동", "송정동", "반여동", "반송동", "재송동"]
+    },
+    "울산광역시": {
+        "남구": ["신정동", "달동", "삼산동", "무거동", "옥동", "야음동", "장생포동", "선암동", "매암동", "여천동", "용잠동", "용연동", "황성동", "고사동", "성암동"],
+        "동구": ["방어동", "일산동", "전하동", "남목동", "화정동", "미포동"],
+        "북구": ["농소동", "강동동", "효문동", "송정동", "양정동", "염포동", "명촌동", "연암동", "매곡동", "중산동"],
+        "울주군": ["온산읍", "언양읍", "온양읍", "범서읍", "서생면", "청량읍", "웅촌면", "두동면", "두서면", "상북면", "삼남읍", "삼동면"],
+        "중구": ["학성동", "반구동", "복산동", "성안동", "중앙동", "우정동", "태화동", "다운동", "병영동", "약사동"]
+    },
+    "경상남도": {
+        "김해시": ["진영읍", "주촌면", "진례면", "한림면", "생림면", "상동면", "대동면", "동상동", "회현동", "부원동", "내외동", "북부동", "칠산서부동", "활천동", "삼안동", "불암동", "장유1동", "장유2동", "장유3동"],
+        "양산시": ["물금읍", "동면", "원동면", "상북면", "하북면", "중앙동", "양주동", "삼성동", "강서동", "소주동", "평산동", "덕계동", "서창동", "어곡동", "산막동", "유산동", "북정동"],
+        "밀양시": ["삼랑진읍", "하남읍", "부북면", "상남면", "초동면", "무안면", "청도면", "단장면", "산외면", "산내면", "내일동", "내이동", "교동", "삼문동", "가곡동"],
+        "창원시 의창구": ["동읍", "북면", "대산면", "의창동", "팔룡동", "명곡동", "봉림동"],
+        "창원시 성산구": ["반송동", "용지동", "중앙동", "상남동", "사파동", "가음정동", "성주동", "웅남동", "신촌동"],
+        "창원시 마산합포구": ["구산면", "진동면", "진북면", "진전면", "현동", "가포동", "월영동", "문화동", "반월중앙동", "완월동", "자산동", "교방동", "노산동", "오동동", "합포동", "산호동"],
+        "창원시 마산회원구": ["내서읍", "회원동", "석전동", "회성동", "양덕동", "합성동", "구암동", "봉암동"],
+        "창원시 진해구": ["충무동", "여좌동", "태백동", "경화동", "병암동", "석동", "이동", "자은동", "덕산동", "풍호동", "웅천동", "웅동1동", "웅동2동", "마천동", "남양동", "명동"],
+        "진주시": ["문산읍", "내동면", "정촌면", "금곡면", "진성면", "일반성면", "이반성면", "사봉면", "지수면", "대곡면", "금산면", "집현면", "미천면", "명석면", "대평면", "수곡면", "천전동", "성북동", "중앙동", "상봉동", "상대동", "하대동", "상평동", "초장동", "평거동", "신안동", "이현동", "판문동", "가호동", "충무공동"],
+        "사천시": ["사천읍", "정동면", "사남면", "용현면", "축동면", "곤양면", "곤명면", "서포면", "동서동", "선구동", "동서금동", "벌용동", "향촌동", "남양동"],
+        "거제시": ["일운면", "동부면", "남부면", "거제면", "둔덕면", "사등면", "연초면", "하청면", "장목면", "장승포동", "능포동", "아주동", "옥포1동", "옥포2동", "장평동", "고현동", "상문동", "수양동"],
+        "통영시": ["산양읍", "용남면", "도산면", "광도면", "욕지면", "한산면", "사량면", "도천동", "명정동", "중앙동", "정량동", "북신동", "무전동", "미수동", "봉평동"],
+        "함안군": ["가야읍", "칠원읍", "함안면", "군북면", "법수면", "대산면", "칠서면", "칠북면", "산인면", "여항면"],
+        "창녕군": ["창녕읍", "남지읍", "고암면", "성산면", "대합면", "이방면", "유어면", "대지면", "계성면", "영산면", "장마면", "도천면", "길곡면", "부곡면"],
+        "고성군": ["고성읍", "삼산면", "하일면", "하이면", "상리면", "대가면", "영현면", "영오면", "개천면", "구만면", "회화면", "마암면", "동해면", "거류면"],
+        "하동군": ["하동읍", "화개면", "악양면", "적량면", "횡천면", "고전면", "금남면", "금성면", "진교면", "양보면", "북천면", "청암면", "옥종면"],
+        "합천군": ["합천읍", "봉산면", "묘산면", "가야면", "야로면", "율곡면", "초계면", "쌍책면", "덕곡면", "청덕면", "적중면", "대양면", "쌍백면", "삼가면", "가회면", "대병면", "용주면"]
+    },
+    "경상북도": {
+        "포항시 남구": ["구룡포읍", "연일읍", "오천읍", "대송면", "동해면", "장기면", "호미곶면", "상대동", "해도동", "송도동", "청림동", "제철동", "효곡동", "대이동", "철강동", "장흥동"],
+        "포항시 북구": ["흥해읍", "신광면", "청하면", "송라면", "기계면", "죽장면", "기북면", "중앙동", "양학동", "죽도동", "용흥동", "우창동", "두호동", "장량동", "환여동"],
+        "경주시": ["건천읍", "외동읍", "안강읍", "감포읍", "양남면", "문무대왕면", "내남면", "산내면", "서면", "현곡면", "강동면", "천북면", "중부동", "황오동", "성건동", "황남동", "월성동", "선도동", "용강동", "황성동", "동천동", "불국동", "보덕동"],
+        "구미시": ["선산읍", "고아읍", "산동읍", "무을면", "옥성면", "도개면", "해평면", "장천면", "송정동", "원평동", "지산동", "도량동", "선주원남동", "형곡1동", "형곡2동", "신평1동", "신평2동", "비산동", "공단동", "광평동", "상모사곡동", "임오동", "인동동", "진미동", "양포동", "임수동", "시미동"],
+        "경산시": ["하양읍", "진량읍", "압량읍", "와촌면", "자인면", "용성면", "남산면", "남천면", "중방동", "중앙동", "남부동", "서부1동", "서부2동", "북부동", "동부동"],
+        "영천시": ["금호읍", "청통면", "신녕면", "화산면", "화북면", "화남면", "자양면", "임고면", "고경면", "북안면", "대창면", "동부동", "중앙동", "명부동", "완산동", "남부동"],
+        "김천시": ["아포읍", "농소면", "남면", "개령면", "감문면", "어모면", "봉산면", "대항면", "감천면", "조마면", "구성면", "지례면", "부항면", "대덕면", "증산면", "자산동", "평화남산동", "양금동", "대신동", "대곡동", "지좌동", "율곡동"],
+        "안동시": ["풍산읍", "와룡면", "북후면", "서후면", "풍천면", "일직면", "남후면", "남선면", "임하면", "길안면", "임동면", "예안면", "도산면", "녹전면", "중구동", "명륜동", "옥동", "송하동", "안기동", "평화동", "안막동", "태화동", "강남동"],
+        "칠곡군": ["왜관읍", "북삼읍", "석적읍", "지천면", "동명면", "가산면", "약목면", "기산면"],
+        "성주군": ["성주읍", "선남면", "용암면", "수륜면", "가천면", "금수면", "대가면", "벽진면", "초전면", "월항면"],
+        "고령군": ["대가야읍", "덕곡면", "운수면", "성산면", "다산면", "개진면", "우곡면", "쌍림면"]
     }
 }
 
 col1, col2, col3 = st.columns(3)
-with col1: sido = st.selectbox("시/도", list(region_data.keys()))
-with col2: sigungu = st.selectbox("시/군/구", list(region_data[sido].keys()))
-with col3: dong = st.selectbox("읍/면/동", region_data[sido][sigungu])
+with col1: 
+    sido = st.selectbox("시/도", list(region_data.keys()))
+with col2: 
+    sigungu = st.selectbox("시/군/구", list(region_data[sido].keys()))
+with col3: 
+    dong = st.selectbox("읍/면/동", region_data[sido][sigungu])
 
 min_area = st.number_input("최소 건축면적 (㎡)", min_value=100, value=5000, step=500)
 target_tab_name = f"target_{sido}_{sigungu}_{dong}"
@@ -258,7 +313,7 @@ if st.button("데이터 조회 및 지도 적용", use_container_width=True):
     if res_center.get("documents"):
         doc = res_center["documents"][0]
         st.session_state.search_center = [float(doc["y"]), float(doc["x"])]
-        st.session_state.map_zoom = 17 
+        st.session_state.map_zoom = 15 
         b_code = doc["address"]["b_code"]
         sigunguCd = b_code[:5]
         bjdongCd = b_code[5:]
@@ -354,7 +409,7 @@ if st.button("데이터 조회 및 지도 적용", use_container_width=True):
                 st.info("조건에 일치하는 데이터가 없습니다.")
 
 # ----------------------------------------------------
-# 🗺️ 5. 지도 렌더링
+# 🗺️ 5. 지도 렌더링 
 # ----------------------------------------------------
 st.divider()
 
@@ -398,7 +453,7 @@ folium.raster_layers.WmsTileLayer(
     transparent=True,
     version="1.3.0",
     key=VWORLD_KEY,
-    domain=VWORLD_DOMAIN,  # 💡 [핵심 수정] 하드코딩된 주소 대신 변수 적용됨
+    domain=VWORLD_DOMAIN, 
     attr="VWorld Cadastral",
     name="지적도(지번경계)",
     overlay=True,
@@ -471,6 +526,8 @@ if not df_all.empty:
     
     df_filtered = df_all[df_all['면적'] >= min_area]
     
+    marker_cluster = MarkerCluster().add_to(m)
+    
     for idx, row in df_filtered.iterrows():
         is_selected = (st.session_state.selected_addr is not None and row['지번주소'] == st.session_state.selected_addr)
         
@@ -487,12 +544,12 @@ if not df_all.empty:
                 location=[row['lat'], row['lng']],
                 tooltip=f"{row['상호명'] if pd.notna(row['상호명']) else '상호명 미상'}",
                 icon=folium.Icon(color=pin_color, icon=icon_shape)
-            ).add_to(m)
+            ).add_to(marker_cluster) 
 
 map_data = st_folium(m, width="100%", height=450, returned_objects=["last_object_clicked", "last_clicked"])
 
 # ----------------------------------------------------
-# 📝 6. 네이게이션 연동 및 편집/신규 폼 
+# 📝 6. 네비게이션 연동 및 편집/신규 폼 
 # ----------------------------------------------------
 clicked_marker = map_data.get("last_object_clicked")
 clicked_map = map_data.get("last_clicked")
@@ -580,89 +637,84 @@ if show_marker_info and selected_comp is not None:
     
     st.divider()
     
-    with st.container():
-        st.markdown('<div style="border: 1px solid #e5e7eb; border-radius: 12px; padding: 24px; background-color: #ffffff; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);">', unsafe_allow_html=True)
-        
-        st.markdown('<div style="font-weight: 600; color: #111827; margin-bottom: 10px;">기본 정보 및 실측 데이터</div>', unsafe_allow_html=True)
-        edited_name = st.text_input("상호명 (간판 기준)", value=str(comp['상호명']) if pd.notna(comp['상호명']) else "")
-        edited_area = st.number_input("지붕 실측 면적(㎡)", value=float(comp['면적']), step=50.0)
-        
-        st.markdown('<div style="font-weight: 600; color: #111827; margin-top: 15px; margin-bottom: 10px;">상태 관리</div>', unsafe_allow_html=True)
-        is_already_installed = True if comp.get('상태', '') == '기설치' else False
-        is_installed = st.checkbox("태양광 기설치 완료 (또는 불가 현장)", value=is_already_installed)
-        
-        st.markdown('<div style="font-weight: 600; color: #111827; margin-top: 15px; margin-bottom: 10px;">영업 현황 기록</div>', unsafe_allow_html=True)
-        
-        method_options = ["미진행", "전화", "이메일", "방문", "기타"]
-        current_method = comp.get('컨택방식', '미진행')
-        
-        if current_method in method_options:
-            contact_idx = method_options.index(current_method)
-            custom_val = ""
-        else:
-            contact_idx = method_options.index("기타")
-            custom_val = current_method
+    st.markdown('<div style="font-weight: 600; color: #111827; margin-bottom: 10px;">기본 정보 및 실측 데이터</div>', unsafe_allow_html=True)
+    edited_name = st.text_input("상호명 (간판 기준)", value=str(comp['상호명']) if pd.notna(comp['상호명']) else "")
+    edited_area = st.number_input("지붕 실측 면적(㎡)", value=float(comp['면적']), step=50.0)
+    
+    st.markdown('<div style="font-weight: 600; color: #111827; margin-top: 15px; margin-bottom: 10px;">상태 관리</div>', unsafe_allow_html=True)
+    is_already_installed = True if comp.get('상태', '') == '기설치' else False
+    is_installed = st.checkbox("태양광 기설치 완료 (또는 불가 현장)", value=is_already_installed)
+    
+    st.markdown('<div style="font-weight: 600; color: #111827; margin-top: 15px; margin-bottom: 10px;">영업 현황 기록</div>', unsafe_allow_html=True)
+    
+    method_options = ["미진행", "전화", "이메일", "방문", "기타"]
+    current_method = comp.get('컨택방식', '미진행')
+    
+    if current_method in method_options:
+        contact_idx = method_options.index(current_method)
+        custom_val = ""
+    else:
+        contact_idx = method_options.index("기타")
+        custom_val = current_method
 
-        selected_contact = st.radio("Contact", method_options, index=contact_idx, horizontal=True)
+    selected_contact = st.radio("Contact", method_options, index=contact_idx, horizontal=True)
 
-        final_contact_method = selected_contact
-        if selected_contact == "기타":
-            final_contact_method = st.text_input("기타 방식 입력", value=custom_val, placeholder="예: 우편, 지인 소개 등")
-            if not final_contact_method.strip():
-                final_contact_method = "기타"
+    final_contact_method = selected_contact
+    if selected_contact == "기타":
+        final_contact_method = st.text_input("기타 방식 입력", value=custom_val, placeholder="예: 우편, 지인 소개 등")
+        if not final_contact_method.strip():
+            final_contact_method = "기타"
 
-        contact_result = "미컨택"
-        if selected_contact != "미진행":
-            status_options = ["거절/보류", "협의중", "승낙서수령", "계약완료"]
-            current_status = comp.get('상태', '미컨택')
-            
-            default_status_idx = status_options.index(current_status) if current_status in status_options else 0 
-            contact_result = st.radio("상세 단계", status_options, index=default_status_idx, horizontal=True)
-
-        current_memo = comp.get('메모', '')
-        if pd.isna(current_memo): current_memo = ""
-        memo = st.text_area("현장 특이사항 및 미팅 노트", value=str(current_memo))
+    contact_result = "미컨택"
+    if selected_contact != "미진행":
+        status_options = ["거절/보류", "협의중", "승낙서수령", "계약완료"]
+        current_status = comp.get('상태', '미컨택')
         
-        if st.button("변경사항 저장", use_container_width=True, type="primary"):
-            if is_installed: final_status = "기설치"
-            elif selected_contact == "미진행": final_status = "미컨택"
-            else: final_status = contact_result
-            
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-            
-            old_status = str(comp.get('상태', ''))
-            old_method = str(comp.get('컨택방식', ''))
-            old_memo = str(comp.get('메모', '')).strip()
-            
-            changes = []
-            if old_status != final_status: 
-                changes.append(f"상태({old_status}→{final_status})")
-            if old_method != final_contact_method: 
-                changes.append(f"방식({old_method}→{final_contact_method})")
-            if old_memo != memo.strip(): 
-                changes.append("메모수정")
-            
-            change_log = " | ".join(changes) if changes else "단순열람(수정없음)"
-            
-            all_df = st.session_state.target_data.copy()
-            mask = (all_df['지번주소'] == comp['지번주소'])
-            
-            all_df.loc[mask, '상호명'] = edited_name
-            all_df.loc[mask, '면적'] = float(edited_area)
-            all_df.loc[mask, '컨택방식'] = final_contact_method
-            all_df.loc[mask, '상태'] = final_status
-            all_df.loc[mask, '수정일시'] = now_str
-            all_df.loc[mask, '메모'] = memo 
-            all_df.loc[mask, '최근수정내역'] = change_log 
-            
-            if st.session_state.current_tab:
-                save_target_data(st.session_state.current_tab, all_df)
-            
-            st.session_state.target_data = all_df
-            st.session_state.save_success = True
-            st.rerun()
-            
-        st.markdown('</div>', unsafe_allow_html=True)
+        default_status_idx = status_options.index(current_status) if current_status in status_options else 0 
+        contact_result = st.radio("상세 단계", status_options, index=default_status_idx, horizontal=True)
+
+    current_memo = comp.get('메모', '')
+    if pd.isna(current_memo): current_memo = ""
+    memo = st.text_area("현장 특이사항 및 미팅 노트", value=str(current_memo))
+    
+    if st.button("변경사항 저장", use_container_width=True, type="primary"):
+        if is_installed: final_status = "기설치"
+        elif selected_contact == "미진행": final_status = "미컨택"
+        else: final_status = contact_result
+        
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+        
+        old_status = str(comp.get('상태', ''))
+        old_method = str(comp.get('컨택방식', ''))
+        old_memo = str(comp.get('메모', '')).strip()
+        
+        changes = []
+        if old_status != final_status: 
+            changes.append(f"상태({old_status}→{final_status})")
+        if old_method != final_contact_method: 
+            changes.append(f"방식({old_method}→{final_contact_method})")
+        if old_memo != memo.strip(): 
+            changes.append("메모수정")
+        
+        change_log = " | ".join(changes) if changes else "단순열람(수정없음)"
+        
+        all_df = st.session_state.target_data.copy()
+        mask = (all_df['지번주소'] == comp['지번주소'])
+        
+        all_df.loc[mask, '상호명'] = edited_name
+        all_df.loc[mask, '면적'] = float(edited_area)
+        all_df.loc[mask, '컨택방식'] = final_contact_method
+        all_df.loc[mask, '상태'] = final_status
+        all_df.loc[mask, '수정일시'] = now_str
+        all_df.loc[mask, '메모'] = memo 
+        all_df.loc[mask, '최근수정내역'] = change_log 
+        
+        if st.session_state.current_tab:
+            save_target_data(st.session_state.current_tab, all_df)
+        
+        st.session_state.target_data = all_df
+        st.session_state.save_success = True
+        st.rerun()
 
 # ------------------------------------------------
 # [B] 지도 빈 공간 클릭 시 (신규 핀 추가 모드)
