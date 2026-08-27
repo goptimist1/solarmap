@@ -13,11 +13,14 @@ from jinja2 import Template
 from folium.plugins import MeasureControl, LocateControl, MarkerCluster
 from streamlit_folium import st_folium
 
+# ============================================================
+# Solar Mkt Map - v4 (DB Update Expansion & Safe Parsing)
+# ============================================================
+
 st.set_page_config(page_title="Solar Mkt Map", layout="centered")
 
 # ------------------------- Secrets ----------------------------
 def secret(name: str, default: str = "") -> str:
-    """Read Streamlit secret first, then environment variable."""
     try:
         value = st.secrets.get(name, default)
         if value:
@@ -33,7 +36,6 @@ VWORLD_DOMAIN = secret(
     "VWORLD_DOMAIN",
     "https://port-0-solarmap-mtatayuj7b3bb02b.sel3.cloudtype.app",
 )
-
 GOOGLE_SHEET_ID = secret("spreadsheet_id")
 
 try:
@@ -195,10 +197,16 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = ""
         df[col] = df[col].fillna("").astype(str).replace("nan", "")
+        
     for col in NUM_COLS:
         if col not in df.columns:
             df[col] = 0.0
+        else:
+            # 엑셀에서 콤마(,)가 포함된 채로 저장되었을 경우를 대비한 안전망
+            if df[col].dtype == object or str(df[col].dtype) == 'string':
+                df[col] = df[col].astype(str).str.replace(",", "", regex=False)
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+        
     if "수동등록" not in df.columns:
         df["수동등록"] = False
     df["수동등록"] = df["수동등록"].astype(str).str.lower().isin(["true", "1", "yes", "y", "t"])
@@ -235,10 +243,8 @@ def require_api_keys() -> bool:
         missing.append("VWORLD_KEY")
     if missing:
         st.error("API 키가 설정되지 않았습니다: " + ", ".join(missing))
-        st.info("Cloudtype 환경변수 또는 Streamlit Secrets에 API 키를 등록한 뒤 다시 실행하세요.")
         return False
     return True
-
 
 # ------------------------- Google Sheets ----------------------
 @st.cache_resource(ttl=3600, show_spinner=False)
@@ -255,10 +261,7 @@ def get_gspread_client():
             return None
         credentials = Credentials.from_service_account_info(
             dict(service_info),
-            scopes=[
-                "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive",
-            ],
+            scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"],
         )
         return gspread.authorize(credentials)
     except Exception:
@@ -290,8 +293,8 @@ def load_target_data(tab_name: str) -> pd.DataFrame:
     if os.path.exists(filename):
         try:
             return normalize_df(pd.read_csv(filename))
-        except Exception as e:
-            st.error(f"CSV 불러오기 실패: {e}")
+        except Exception:
+            pass
     return pd.DataFrame(columns=TARGET_COLS)
 
 def save_target_data(tab_name: str, df: pd.DataFrame) -> bool:
@@ -321,11 +324,7 @@ def save_target_data(tab_name: str, df: pd.DataFrame) -> bool:
 
 def append_activity(site_id: str, tab_name: str, before: dict, after: dict, action: str) -> bool:
     row = activity_row(site_id, tab_name, before, after, action)
-    headers = [
-        "기록일시", "site_id", "지역탭", "상호명", "지번주소",
-        "접촉방식", "상태", "면적", "메모", "변경내역", "행동"
-    ]
-
+    headers = ["기록일시", "site_id", "지역탭", "상호명", "지번주소", "접촉방식", "상태", "면적", "메모", "변경내역", "행동"]
     st.session_state.activity_rows_session = [row] + list(st.session_state.get("activity_rows_session", []))
 
     gc = get_gspread_client()
@@ -369,17 +368,11 @@ def activity_row(site_id, tab_name, before, after, action):
     if action == "신규등록":
         changes = ["신규 현장 발굴 및 등록"]
     return {
-        "기록일시": now_str(),
-        "site_id": site_id,
-        "지역탭": tab_name,
-        "상호명": after.get("상호명", ""),
-        "지번주소": after.get("지번주소", ""),
-        "접촉방식": after.get("컨택방식", ""),
-        "상태": after.get("상태", ""),
-        "면적": after.get("면적", ""),
-        "메모": after.get("메모", ""),
-        "변경내역": " | ".join(changes) if changes else "단순열람(수정없음)",
-        "행동": action,
+        "기록일시": now_str(), "site_id": site_id, "지역탭": tab_name,
+        "상호명": after.get("상호명", ""), "지번주소": after.get("지번주소", ""),
+        "접촉방식": after.get("컨택방식", ""), "상태": after.get("상태", ""),
+        "면적": after.get("면적", ""), "메모": after.get("메모", ""),
+        "변경내역": " | ".join(changes) if changes else "단순열람(수정없음)", "행동": action,
     }
 
 @st.cache_data(ttl=10, show_spinner=False)
@@ -397,16 +390,14 @@ def load_activity_log() -> pd.DataFrame:
                     width = len(headers)
                     normalized_rows = [(r + [""] * width)[:width] for r in rows]
                     return pd.DataFrame(normalized_rows, columns=headers)
-        except Exception as e:
-            st.session_state.activity_status = f"활동 이력 조회 실패 → 임시 기록 사용: {e}"
-
+        except Exception:
+            pass
     if os.path.exists("activity_log.csv"):
         try:
             return pd.read_csv("activity_log.csv")
         except Exception:
             pass
     return pd.DataFrame()
-
 
 # ------------------------- Kakao API --------------------------
 def kakao_headers():
@@ -512,7 +503,7 @@ def fetch_building_targets(sigungu_cd: str, bjdong_cd: str):
     progress.empty(); status_box.empty()
     return raw
 
-def build_target_df(sido, sigungu, dong, min_area):
+def build_target_df(sido, sigungu, dong, min_area, existing_df=None):
     center = geocode_address(f"{sido} {sigungu} {dong}")
     if not center or not center.get("b_code"):
         raise RuntimeError("선택한 읍/면/동의 좌표 또는 법정동코드를 찾지 못했습니다.")
@@ -520,22 +511,38 @@ def build_target_df(sido, sigungu, dong, min_area):
     sigungu_cd = center["b_code"][:5]
     bjdong_cd = center["b_code"][5:]
     raw = fetch_building_targets(sigungu_cd, bjdong_cd)
+    
+    if existing_df is None or existing_df.empty:
+        base_df = pd.DataFrame(columns=TARGET_COLS)
+        existing_addrs = set()
+    else:
+        base_df = existing_df.copy()
+        existing_addrs = set(base_df["지번주소"].astype(str).str.strip())
+
     if not raw:
-        return pd.DataFrame(columns=TARGET_COLS), center
+        return base_df, center
 
     raw_df = pd.DataFrame(raw)
     grouped = raw_df.groupby("지번주소", as_index=False).agg({
         "건축면적(㎡)": "sum",
         "건물명": lambda x: ", ".join(sorted(set(filter(None, x)))),
     })
+    
+    # 설정한 면적 이상인 타겟만 필터링
     filtered = grouped[grouped["건축면적(㎡)"] >= float(min_area)].copy()
-    if filtered.empty:
-        return pd.DataFrame(columns=TARGET_COLS), center
+    
+    # 이미 기존 DB(엑셀)에 들어있는 주소는 또 API를 부르지 않도록 제외합니다 (영업이력 보호)
+    new_targets = filtered[~filtered["지번주소"].astype(str).str.strip().isin(existing_addrs)]
+    
+    if new_targets.empty:
+        return base_df, center
 
     rows = []
     bar = st.progress(0)
     box = st.empty()
-    for i, (_, row) in enumerate(filtered.iterrows(), start=1):
+    
+    total_new = len(new_targets)
+    for i, (_, row) in enumerate(new_targets.iterrows(), start=1):
         addr = row["지번주소"]
         geo = geocode_address(addr)
         lat = geo["lat"] if geo else 0.0
@@ -550,11 +557,19 @@ def build_target_df(sido, sigungu, dong, min_area):
             "등록일시": now_str(), "수정일시": now_str(), "메모": "",
             "최근수정내역": "", "수동등록": False,
         })
-        bar.progress(i / len(filtered))
-        box.info(f"주소 좌표/상호명 변환 중: {i}/{len(filtered)}")
+        bar.progress(i / total_new)
+        box.info(f"신규 추가 공장({total_new}곳) 좌표 변환 중: {i}/{total_new}")
+        
     bar.empty(); box.empty()
-    result = normalize_df(pd.DataFrame(rows))
-    return result[result["lat"].ne(0) & result["lng"].ne(0)].reset_index(drop=True), center
+    
+    if rows:
+        new_df = pd.DataFrame(rows)
+        # 기존 데이터와 신규 데이터를 합치고 정규화(ID 부여 등)
+        combined = pd.concat([base_df, new_df], ignore_index=True)
+        combined = normalize_df(combined)
+        return combined, center
+        
+    return base_df, center
 
 # ------------------------- Region/search UI ------------------
 st.markdown('<div class="section-title">타겟 지역 및 조건 설정</div>', unsafe_allow_html=True)
@@ -565,7 +580,11 @@ with col2:
     sigungu = st.selectbox("시/군/구", list(REGION_DATA[sido].keys()))
 with col3:
     dong = st.selectbox("읍/면/동", REGION_DATA[sido][sigungu])
+
 min_area = st.number_input("최소 건축면적 (㎡)", min_value=100, value=5000, step=500)
+
+# 핵심! DB 강제 업데이트 체크박스 추가
+update_db = st.checkbox("🔄 새로운 면적 조건으로 DB 데이터 추가 수집 (기존 영업이력은 안전하게 유지됩니다)", value=False)
 target_tab_name = f"target_{sido}_{sigungu}_{dong}"
 
 if st.button("데이터 조회 및 지도 적용", use_container_width=True, type="primary"):
@@ -574,6 +593,7 @@ if st.button("데이터 조회 및 지도 적용", use_container_width=True, typ
     try:
         with st.spinner("기존 DB 확인 중..."):
             existing = load_target_data(target_tab_name)
+            
         st.session_state.current_tab = target_tab_name
         center = geocode_address(f"{sido} {sigungu} {dong}")
         if not center:
@@ -582,26 +602,32 @@ if st.button("데이터 조회 및 지도 적용", use_container_width=True, typ
         st.session_state.search_center = [center["lat"], center["lng"]]
         st.session_state.map_zoom = 15
 
-        if not existing.empty:
+        if not existing.empty and not update_db:
             st.session_state.target_data = existing
             st.session_state.last_loaded_tab = target_tab_name
-            st.success(f"기존 데이터 {len(existing):,}건을 불러왔습니다.")
+            st.success(f"기존에 수집된 데이터 {len(existing):,}건을 불러왔습니다. (더 많은 대상을 찾으려면 위 🔄 DB 수집 체크박스를 켜주세요)")
         else:
-            with st.spinner("최초 1회 타겟 DB를 구축합니다. 대상이 많으면 시간이 걸릴 수 있습니다."):
-                built, center = build_target_df(sido, sigungu, dong, min_area)
+            msg = "타겟 DB를 업데이트합니다. (대상이 많으면 시간이 걸릴 수 있습니다.)" if not existing.empty else "최초 1회 타겟 DB를 구축합니다. (대상이 많으면 시간이 걸릴 수 있습니다.)"
+            with st.spinner(msg):
+                built, center = build_target_df(sido, sigungu, dong, min_area, existing)
+            
             if built.empty:
                 st.info("조건에 일치하는 데이터가 없습니다.")
             else:
                 if save_target_data(target_tab_name, built):
                     st.session_state.target_data = built
                     st.session_state.last_loaded_tab = target_tab_name
-                    st.success(f"신규 타겟 DB 구축 완료: {len(built):,}건")
+                    added_count = len(built) - len(existing) if not existing.empty else len(built)
+                    
+                    if added_count > 0:
+                        st.success(f"타겟 DB 업데이트 완료! 신규 {added_count:,}건 추가됨 (총 {len(built):,}건 보유)")
+                    else:
+                        st.success(f"타겟 DB 업데이트 완료! (새로운 면적 조건에 추가되는 신규 현장이 없습니다. 총 {len(built):,}건 보유)")
     except Exception as e:
         st.error(f"조회/구축 중 오류: {e}")
 
 # ------------------------- Map -------------------------------
 class CadastralToggle(MacroElement):
-    """Small, reliable Leaflet control for the cadastral WMS layer."""
     _template = Template(r"""
     {% macro script(this, kwargs) %}
     (function() {
@@ -648,8 +674,6 @@ class CadastralToggle(MacroElement):
         self.layer_name = layer_name
 
 class MapViewPersistence(MacroElement):
-    """Persist only the browser-side zoom so marker clicks can rerun Python
-    without resetting the user's current zoom level."""
     _template = Template(r"""
     {% macro script(this, kwargs) %}
     (function() {
@@ -736,7 +760,6 @@ cadastral_layer = folium.raster_layers.WmsTileLayer(
     show=False,
 ).add_to(m)
 
-# 💡 이 부분이 바로 에러를 뿜었던 범인입니다! 완벽하게 고쳐두었습니다.
 CadastralToggle(cadastral_layer.get_name()).add_to(m)
 
 zoom_storage_key = "solar_mkt_zoom::" + target_tab_name
@@ -780,6 +803,7 @@ m.get_root().header.add_child(folium.Element("""
 df_all = normalize_df(st.session_state.target_data)
 st.session_state.target_data = df_all
 
+# 현재 설정된 최소면적 이상인 것만 '지도'에 표시합니다.
 df_filtered = df_all[df_all["면적"] >= float(min_area)].copy() if not df_all.empty else df_all
 
 marker_count = 0
