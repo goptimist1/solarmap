@@ -7,17 +7,17 @@ import pandas as pd
 import requests
 import streamlit as st
 import folium
-from folium.plugins import MeasureControl, LocateControl
+from folium.plugins import MeasureControl, LocateControl, MarkerCluster
 from streamlit_folium import st_folium
 
 # ============================================================
-# Solar Mkt Map - improved production-oriented version
+# Solar Mkt Map - v3 performance optimized version
 # Existing UX/features are intentionally preserved:
 # - Yeongnam dropdowns
 # - building-register target discovery
 # - satellite + cadastral layer
 # - current-location / measure / compass
-# - stable map markers (no clustering, so marker selection keeps the current zoom)
+# - performance optimized markers + stable selection
 # - existing target edit
 # - manual target registration
 # - navigation links
@@ -25,6 +25,8 @@ from streamlit_folium import st_folium
 # - Google Sheets persistence with CSV fallback during setup
 # - NEW: stable site_id, cumulative activity log, safer secrets,
 #        duplicate detection, timeouts, clearer save errors
+# - PERFORMANCE: cached Google Sheets client/data; map zoom/pan do not request
+#        zoom/center back to Python; marker clustering is used at low zoom.
 # ============================================================
 
 st.set_page_config(page_title="Solar Mkt Map", layout="centered")
@@ -260,6 +262,7 @@ def require_api_keys() -> bool:
 
 
 # ------------------------- Google Sheets ----------------------
+@st.cache_resource(ttl=3600, show_spinner=False)
 def get_gspread_client():
     if not GS_AVAILABLE or not GOOGLE_SHEET_ID:
         return None
@@ -295,6 +298,7 @@ def get_or_create_ws(sh, title, rows=100, cols=30):
         return sh.add_worksheet(title=title, rows=str(max(rows, 100)), cols=str(max(cols, 20)))
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def load_target_data(tab_name: str) -> pd.DataFrame:
     gc = get_gspread_client()
     if gc:
@@ -329,6 +333,7 @@ def save_target_data(tab_name: str, df: pd.DataFrame) -> bool:
             ws.clear()
             values = [df_save.columns.tolist()] + df_save.fillna("").astype(object).values.tolist()
             ws.update(values=values, range_name="A1")
+            load_target_data.clear()
             return True
         except Exception as e:
             st.error(f"Google Sheets 저장 실패: {e}")
@@ -336,6 +341,7 @@ def save_target_data(tab_name: str, df: pd.DataFrame) -> bool:
 
     try:
         df_save.to_csv(f"{tab_name}.csv", index=False, encoding="utf-8-sig")
+        load_target_data.clear()
         return True
     except Exception as e:
         st.error(f"CSV 저장 실패: {e}")
@@ -352,6 +358,7 @@ def append_activity(site_id: str, tab_name: str, before: dict, after: dict, acti
         try:
             old = pd.read_csv(path) if os.path.exists(path) else pd.DataFrame()
             pd.concat([old, pd.DataFrame([row])], ignore_index=True).to_csv(path, index=False, encoding="utf-8-sig")
+            load_activity_log.clear()
             return True
         except Exception as e:
             st.warning(f"활동 이력 저장 실패: {e}")
@@ -368,6 +375,7 @@ def append_activity(site_id: str, tab_name: str, before: dict, after: dict, acti
             ws.update(values=[headers], range_name="A1")
         row = activity_row(site_id, tab_name, before, after, action)
         ws.append_row([row.get(h, "") for h in headers], value_input_option="USER_ENTERED")
+        load_activity_log.clear()
         return True
     except Exception as e:
         st.warning(f"활동 이력 저장 실패: {e}")
@@ -398,6 +406,7 @@ def activity_row(site_id, tab_name, before, after, action):
     }
 
 
+@st.cache_data(ttl=15, show_spinner=False)
 def load_activity_log() -> pd.DataFrame:
     gc = get_gspread_client()
     if gc:
@@ -639,6 +648,10 @@ m = folium.Map(
     tiles=None,
 )
 
+# Zoom/pan are intentionally not returned to Python. With the stable st_folium key,
+# Leaflet keeps its current view while click events are returned. This avoids a
+# Streamlit rerun on every mouse-wheel zoom/pan action.
+
 folium.TileLayer(
     tiles="https://xdworld.vworld.kr/2d/Satellite/service/{z}/{x}/{y}.jpeg",
     attr="VWorld",
@@ -786,6 +799,19 @@ df_filtered = df_all[df_all["면적"] >= float(min_area)].copy() if not df_all.e
 marker_count = 0
 coord_missing_count = 0
 
+# MarkerCluster reduces browser DOM/Leaflet work when many targets are visible.
+# At zoom 17+ markers are individual so a field user can select a specific site.
+marker_cluster = MarkerCluster(
+    name="현장 핀",
+    options={
+        "disableClusteringAtZoom": 17,
+        "spiderfyOnMaxZoom": True,
+        "showCoverageOnHover": False,
+        "removeOutsideVisibleBounds": True,
+        "animate": False,
+    },
+).add_to(m)
+
 for _, row in df_filtered.iterrows():
     lat = pd.to_numeric(row.get("lat"), errors="coerce")
     lng = pd.to_numeric(row.get("lng"), errors="coerce")
@@ -804,32 +830,27 @@ for _, row in df_filtered.iterrows():
         tooltip=name,
         popup=folium.Popup(popup, max_width=280),
         icon=folium.Icon(color=color, icon=icon),
-    ).add_to(m)
+    ).add_to(marker_cluster)
     marker_count += 1
 
 st.caption(f"지도 표시 대상 {len(df_filtered):,}건 · 실제 핀 {marker_count:,}개 · 좌표 없음 {coord_missing_count:,}개")
+
+# IMPORTANT: Do not request zoom/center from st_folium.
+# That makes every wheel/pan action feed Python/Streamlit and can cause a full rerun.
+# We only need click events here; normal zoom/pan stays entirely inside Leaflet.
+map_center = tuple(float(v) for v in st.session_state.search_center)
 
 map_data = st_folium(
     m,
     width="100%",
     height=450,
-    returned_objects=["last_object_clicked", "last_clicked", "zoom", "center"],
+    returned_objects=["last_object_clicked", "last_clicked"],
+    center=map_center,
     key="solar_mkt_map",
 )
 
 clicked_marker = map_data.get("last_object_clicked")
 clicked_map = map_data.get("last_clicked")
-
-# Keep the user's current zoom level across Streamlit reruns.
-# This prevents marker selection from jumping back to the default zoom.
-current_zoom = map_data.get("zoom")
-if current_zoom is not None:
-    try:
-        current_zoom = int(round(float(current_zoom)))
-        if 1 <= current_zoom <= 19:
-            st.session_state.map_zoom = current_zoom
-    except (TypeError, ValueError):
-        pass
 
 # Marker click: match by coordinates but select by stable site_id.
 # The selected marker is recentered, but the current zoom level is preserved.
