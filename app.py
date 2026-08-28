@@ -10,11 +10,11 @@ import streamlit as st
 import folium
 from branca.element import MacroElement
 from jinja2 import Template
-from folium.plugins import MeasureControl, LocateControl, MarkerCluster
+from folium.plugins import MeasureControl, LocateControl
 from streamlit_folium import st_folium
 
 # ============================================================
-# Solar Mkt Map - v6 (Vertical Log Fix + Form Performance Optimization)
+# Solar Mkt Map - v7 (Remove Clustering, Restore Zoom/Center UX)
 # ============================================================
 
 st.set_page_config(page_title="Solar Mkt Map", layout="centered")
@@ -321,7 +321,6 @@ def save_target_data(tab_name: str, df: pd.DataFrame) -> bool:
         st.error(f"CSV 저장 실패: {e}")
         return False
 
-# 💡 핵심 수정: 오른쪽으로 늘어나지 않고 A2, A3... 순서대로 아래로 정확히 쌓이게 개선!
 def append_activity(site_id: str, tab_name: str, before: dict, after: dict, action: str) -> bool:
     row = activity_row(site_id, tab_name, before, after, action)
     headers = ["기록일시", "site_id", "지역탭", "상호명", "지번주소", "접촉방식", "상태", "면적", "메모", "변경내역", "행동"]
@@ -341,7 +340,6 @@ def append_activity(site_id: str, tab_name: str, before: dict, after: dict, acti
                 next_row = len(existing) + 1
                 
             row_vals = [str(row.get(h, "")) for h in headers]
-            # append_row 대신 특정 A열 위치를 정확히 지정하여 아래로 저장
             ws.update(values=[row_vals], range_name=f"A{next_row}")
             load_activity_log.clear()
             st.session_state.activity_status = "Google Sheets 활동 이력 저장 완료"
@@ -806,19 +804,8 @@ df_filtered = df_all[df_all["면적"] >= float(min_area)].copy() if not df_all.e
 marker_count = 0
 coord_missing_count = 0
 
-if len(df_filtered) >= 100:
-    marker_parent = MarkerCluster(
-        name="현장 핀",
-        options={
-            "disableClusteringAtZoom": 17,
-            "spiderfyOnMaxZoom": True,
-            "showCoverageOnHover": False,
-            "removeOutsideVisibleBounds": True,
-            "animate": False,
-        },
-    ).add_to(m)
-else:
-    marker_parent = m
+# 💡 핵심 변경점: 녹색 동그라미(MarkerCluster)를 완전히 삭제하고, 이전처럼 항상 기본 지도(m)에 핀을 꽂습니다.
+marker_parent = m
 
 for _, row in df_filtered.iterrows():
     lat = pd.to_numeric(row.get("lat"), errors="coerce")
@@ -920,7 +907,6 @@ if selected_comp is not None:
 
     st.divider()
 
-    # 💡 핵심 수정: 전체 수정 입력을 폼(Form)으로 묶어 버튼/라디오 클릭 시 화면 깜빡임/로딩 완벽 제거!
     with st.form(key=f"edit_form_{comp['site_id']}"):
         edited_name = st.text_input("상호명 (간판 기준)", value=str(comp.get("상호명", "")))
         edited_area = st.number_input("지붕 실측 면적(㎡)", min_value=0.0, value=float(comp.get("면적", 0.0)), step=50.0)
