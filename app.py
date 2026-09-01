@@ -955,69 +955,171 @@ def fetch_building_targets(sigungu_cd: str, bjdong_cd: str):
     raw = []
     page_no = 1
     total_count = 0
+
     progress = st.progress(0)
     status_box = st.empty()
-    
-    url = "https://apis.data.go.kr/1613000/BldRgstService_2.0/getBrTitleInfo"
-    
+
+    # 공공데이터포털 인증키가 이미 URL 인코딩된 상태로 저장되어 있는지 판별
+    # (== '%'' 가 포함되어 있으면 이미 인코딩된 것)
+    service_key = DATA_GO_KR_KEY.strip()
+    key_is_encoded = "%" in service_key
+
+    # 두 개의 엔드포인트를 순차 시도 (신/구 API 대응)
+    urls_to_try = [
+        "https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo",
+        "https://apis.data.go.kr/1613000/BldRgstService_2.0/getBrTitleInfo",
+    ]
+
+    successful_url = None
+    last_error_detail = ""
+
     while page_no <= PUBLIC_DATA_MAX_PAGES:
-        params = {
-            "serviceKey": DATA_GO_KR_KEY,
-            "sigunguCd": sigungu_cd,
-            "bjdongCd": bjdong_cd,
-            "numOfRows": 100,
-            "pageNo": page_no,
-            "_type": "json",
-        }
+        # 성공한 URL이 있으면 그것만 계속 사용, 없으면 시도
+        candidate_urls = (
+            [successful_url] if successful_url else urls_to_try
+        )
         
-        try:
-            response = HTTP_SESSION.get(url, params=params, timeout=20)
-            response.raise_for_status()
-            data = response.json()
-            
-            response_obj = data.get("response", {})
-            header = response_obj.get("header", {})
-            
-            if header.get("resultCode") != "00":
-                raise RuntimeError(header.get("resultMsg", "건축물대장 API 오류"))
+        page_success = False
+
+        for url in candidate_urls:
+            try:
+                # 인증키가 이미 인코딩되어 있으면 URL에 직접 포함,
+                # 아니면 params로 전달 (requests가 인코딩)
+                if key_is_encoded:
+                    request_url = f"{url}?serviceKey={service_key}"
+                    params = {
+                        "sigunguCd": sigungu_cd,
+                        "bjdongCd": bjdong_cd,
+                        "numOfRows": 100,
+                        "pageNo": page_no,
+                        "_type": "json",
+                    }
+                    response = HTTP_SESSION.get(
+                        request_url,
+                        params=params,
+                        timeout=20,
+                    )
+                else:
+                    params = {
+                        "serviceKey": service_key,
+                        "sigunguCd": sigungu_cd,
+                        "bjdongCd": bjdong_cd,
+                        "numOfRows": 100,
+                        "pageNo": page_no,
+                        "_type": "json",
+                    }
+                    response = HTTP_SESSION.get(
+                        url,
+                        params=params,
+                        timeout=20,
+                    )
+
+                # 400/404 등이면 다음 URL 시도
+                if response.status_code >= 400:
+                    last_error_detail = f"HTTP {response.status_code} @ {url}"
+                    continue
+
+                # XML 오류 응답 감지 (공공데이터포털은 인증 오류를 XML로 반환)
+                response_text = response.text.strip()
                 
-            body = response_obj.get("body", {})
-            total_count = int(body.get("totalCount", 0) or 0)
-            items = body.get("items", {}).get("item", [])
-            
-            if isinstance(items, dict):
-                items = [items]
-            if not items:
-                break
+                if response_text.startswith("<"):
+                    # SERVICE_KEY_IS_NOT_REGISTERED_ERROR 등의 오류
+                    if "SERVICE_KEY" in response_text:
+                        raise RuntimeError(
+                            "인증키가 유효하지 않거나 아직 활성화되지 않았습니다. "
+                            "공공데이터포털에서 승인 상태를 확인하세요. "
+                            "(승인 후 1~2시간 소요)"
+                        )
+                    
+                    if "NO_OPENAPI_SERVICE_ERROR" in response_text:
+                        last_error_detail = f"API 서비스 없음 @ {url}"
+                        continue
+                        
+                    if "LIMITED_NUMBER" in response_text:
+                        raise RuntimeError("일일 트래픽 한도를 초과했습니다.")
+                        
+                    # 그 외 XML 오류
+                    last_error_detail = f"XML 오류 응답 @ {url}: {response_text[:200]}"
+                    continue
+
+                data = response.json()
+                response_obj = data.get("response", {})
+                header = response_obj.get("header", {})
                 
-            for item in items:
-                area = safe_float(item.get("archArea", 0))
-                raw.append({
-                    "지번주소": item.get("platPlc", "주소없음"),
-                    "건물명": item.get("bldNm", ""),
-                    "건축면적(㎡)": area,
-                })
+                result_code = str(header.get("resultCode", "")).strip()
                 
-            processed = min(page_no * 100, total_count)
-            progress_value = processed / max(total_count, 1)
-            progress.progress(min(progress_value, 1.0))
-            status_box.info(f"건축물대장 수집 중: {processed:,}/{total_count:,}")
-            
-            if page_no * 100 >= total_count:
-                break
-            page_no += 1
-            
-        except requests.exceptions.RequestException as exc:
+                if result_code and result_code != "00":
+                    raise RuntimeError(
+                        header.get("resultMsg", f"API 오류 코드: {result_code}")
+                    )
+
+                body = response_obj.get("body", {})
+                total_count = int(body.get("totalCount", 0) or 0)
+                items = body.get("items", {}).get("item", [])
+
+                if isinstance(items, dict):
+                    items = [items]
+
+                # 성공 -> 이 URL을 이후에도 계속 사용
+                successful_url = url
+                page_success = True
+
+                if not items:
+                    break
+
+                for item in items:
+                    area = safe_float(item.get("archArea", 0))
+                    raw.append({
+                        "지번주소": item.get("platPlc", "주소없음"),
+                        "건물명": item.get("bldNm", ""),
+                        "건축면적(㎡)": area,
+                    })
+
+                processed = min(page_no * 100, total_count)
+                progress_value = processed / max(total_count, 1)
+                progress.progress(min(progress_value, 1.0))
+                
+                status_box.info(
+                    "건축물대장 수집 중: "
+                    f"{processed:,}/{total_count:,}"
+                )
+
+                break  # 이 URL로 성공, page 루프의 for 종료
+
+            except requests.exceptions.RequestException as exc:
+                last_error_detail = f"통신 오류 @ {url}: {exc}"
+                continue
+                
+            except RuntimeError:
+                # 인증 오류 등은 재시도 없이 즉시 상위로
+                progress.empty()
+                status_box.empty()
+                raise
+                
+            except Exception as exc:
+                last_error_detail = f"예외 @ {url}: {exc}"
+                continue
+
+        if not page_success:
             progress.empty()
             status_box.empty()
-            raise RuntimeError(f"공공데이터포털 통신 실패: {exc}")
-        except Exception as exc:
-            progress.empty()
-            status_box.empty()
-            raise RuntimeError(f"건축물대장 조회 실패: {exc}")
+            raise RuntimeError(
+                "공공데이터포털 통신 실패. "
+                f"세부 정보: {last_error_detail}"
+            )
+
+        # items가 비어 있으면 종료
+        if not items:
+            break
             
+        if page_no * 100 >= total_count:
+            break
+            
+        page_no += 1
+
     progress.empty()
     status_box.empty()
+    
     return raw
 
 # ============================================================
