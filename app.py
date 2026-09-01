@@ -952,6 +952,8 @@ def get_place_info_from_coords(lat, lng):
 # ============================================================
 
 def fetch_building_targets(sigungu_cd: str, bjdong_cd: str):
+    import time
+    
     raw = []
     page_no = 1
     total_count = 0
@@ -959,8 +961,6 @@ def fetch_building_targets(sigungu_cd: str, bjdong_cd: str):
     progress = st.progress(0)
     status_box = st.empty()
 
-    # 🚨 핵심 해결책: 어떤 형태의 키(인코딩/디코딩)가 입력되든 강제로 껍질을 벗겨(unquote) 순수 문자열로 만듭니다.
-    # 이후 requests 라이브러리가 API 스펙에 맞춰 딱 한 번만 올바르게 인코딩하여 전송합니다.
     pure_key = urllib.parse.unquote(DATA_GO_KR_KEY.strip())
 
     urls_to_try = [
@@ -976,92 +976,101 @@ def fetch_building_targets(sigungu_cd: str, bjdong_cd: str):
         page_success = False
 
         for url in candidate_urls:
-            try:
-                # 조건부 분기 없이 깔끔하게 params 딕셔너리에 담아 전송
-                params = {
-                    "serviceKey": pure_key,
-                    "sigunguCd": sigungu_cd,
-                    "bjdongCd": bjdong_cd,
-                    "numOfRows": 100,
-                    "pageNo": page_no,
-                    "_type": "json",
-                }
-                
-                response = HTTP_SESSION.get(
-                    url,
-                    params=params,
-                    timeout=20,
-                )
-
-                if response.status_code >= 400:
-                    last_error_detail = f"HTTP {response.status_code} @ {url}"
-                    continue
-
-                response_text = response.text.strip()
-                
-                if response_text.startswith("<"):
-                    if "SERVICE_KEY" in response_text:
-                        raise RuntimeError("인증키가 유효하지 않거나 아직 활성화되지 않았습니다. (승인 후 1~2시간 소요)")
-                    if "NO_OPENAPI_SERVICE_ERROR" in response_text:
-                        last_error_detail = f"API 서비스 없음 @ {url}"
-                        continue
-                    if "LIMITED_NUMBER" in response_text:
-                        raise RuntimeError("일일 트래픽 한도를 초과했습니다.")
+            # 🚨 추가된 핵심 로직: 503 등 서버 과부하 시 최대 3회 재시도(Retry)
+            for attempt in range(3):
+                try:
+                    params = {
+                        "serviceKey": pure_key,
+                        "sigunguCd": sigungu_cd,
+                        "bjdongCd": bjdong_cd,
+                        "numOfRows": 100,
+                        "pageNo": page_no,
+                        "_type": "json",
+                    }
                     
-                    last_error_detail = f"XML 오류 응답 @ {url}: {response_text[:200]}"
+                    response = HTTP_SESSION.get(url, params=params, timeout=20)
+
+                    # 500번대 에러(서버 과부하, 다운)면 2초 대기 후 재도전
+                    if response.status_code >= 500:
+                        last_error_detail = f"서버 지연 {response.status_code} @ {url} (재시도 {attempt+1}/3)"
+                        time.sleep(2)
+                        continue
+                        
+                    # 400번대 에러면 재도전 없이 즉시 다음 URL(구형 API 등) 시도
+                    if response.status_code >= 400:
+                        last_error_detail = f"HTTP {response.status_code} @ {url}"
+                        break
+
+                    response_text = response.text.strip()
+                    
+                    if response_text.startswith("<"):
+                        if "SERVICE_KEY" in response_text:
+                            raise RuntimeError("인증키가 유효하지 않거나 아직 활성화되지 않았습니다. (승인 후 1~2시간 소요)")
+                        if "NO_OPENAPI_SERVICE_ERROR" in response_text:
+                            last_error_detail = f"API 서비스 없음 @ {url}"
+                            break
+                        if "LIMITED_NUMBER" in response_text:
+                            raise RuntimeError("일일 트래픽 한도를 초과했습니다.")
+                        
+                        last_error_detail = f"XML 오류 응답 @ {url}: {response_text[:200]}"
+                        break
+
+                    data = response.json()
+                    response_obj = data.get("response", {})
+                    header = response_obj.get("header", {})
+                    
+                    result_code = str(header.get("resultCode", "")).strip()
+                    
+                    if result_code and result_code != "00":
+                        raise RuntimeError(header.get("resultMsg", f"API 오류 코드: {result_code}"))
+
+                    body = response_obj.get("body", {})
+                    total_count = int(body.get("totalCount", 0) or 0)
+                    items = body.get("items", {}).get("item", [])
+
+                    if isinstance(items, dict):
+                        items = [items]
+
+                    successful_url = url
+                    page_success = True
+
+                    if not items:
+                        break
+
+                    for item in items:
+                        area = safe_float(item.get("archArea", 0))
+                        raw.append({
+                            "지번주소": item.get("platPlc", "주소없음"),
+                            "건물명": item.get("bldNm", ""),
+                            "건축면적(㎡)": area,
+                        })
+
+                    processed = min(page_no * 100, total_count)
+                    progress.progress(processed / max(total_count, 1))
+                    status_box.info(f"건축물대장 수집 중: {processed:,}/{total_count:,}")
+
+                    break  # 정상 수집 완료 시 재시도(attempt) for 루프 탈출
+
+                except requests.exceptions.RequestException as exc:
+                    last_error_detail = f"통신 끊김 @ {url} (재시도 {attempt+1}/3): {exc}"
+                    time.sleep(2)
                     continue
-
-                data = response.json()
-                response_obj = data.get("response", {})
-                header = response_obj.get("header", {})
-                
-                result_code = str(header.get("resultCode", "")).strip()
-                
-                if result_code and result_code != "00":
-                    raise RuntimeError(header.get("resultMsg", f"API 오류 코드: {result_code}"))
-
-                body = response_obj.get("body", {})
-                total_count = int(body.get("totalCount", 0) or 0)
-                items = body.get("items", {}).get("item", [])
-
-                if isinstance(items, dict):
-                    items = [items]
-
-                successful_url = url
-                page_success = True
-
-                if not items:
+                except RuntimeError:
+                    progress.empty()
+                    status_box.empty()
+                    raise
+                except Exception as exc:
+                    last_error_detail = f"예외 @ {url}: {exc}"
                     break
 
-                for item in items:
-                    area = safe_float(item.get("archArea", 0))
-                    raw.append({
-                        "지번주소": item.get("platPlc", "주소없음"),
-                        "건물명": item.get("bldNm", ""),
-                        "건축면적(㎡)": area,
-                    })
-
-                processed = min(page_no * 100, total_count)
-                progress.progress(processed / max(total_count, 1))
-                status_box.info(f"건축물대장 수집 중: {processed:,}/{total_count:,}")
-
-                break  # 이 URL로 성공, for 루프 종료
-
-            except requests.exceptions.RequestException as exc:
-                last_error_detail = f"통신 오류 @ {url}: {exc}"
-                continue
-            except RuntimeError:
-                progress.empty()
-                status_box.empty()
-                raise
-            except Exception as exc:
-                last_error_detail = f"예외 @ {url}: {exc}"
-                continue
+            # 3회 재도전 후 정상 수집(page_success)되었다면 candidate_urls for 루프 탈출
+            if page_success:
+                break
 
         if not page_success:
             progress.empty()
             status_box.empty()
-            raise RuntimeError(f"공공데이터포털 통신 실패. 세부 정보: {last_error_detail}")
+            raise RuntimeError(f"공공데이터포털 서버 불안정 통신 실패. 세부 정보: {last_error_detail}")
 
         if not items or page_no * 100 >= total_count:
             break
@@ -1072,7 +1081,6 @@ def fetch_building_targets(sigungu_cd: str, bjdong_cd: str):
     status_box.empty()
     
     return raw
-
 # ============================================================
 # Build Target DB
 # ============================================================
