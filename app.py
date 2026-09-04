@@ -8,6 +8,8 @@ from datetime import datetime
 
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import streamlit as st
 import folium
 from branca.element import MacroElement
@@ -16,45 +18,25 @@ from folium.plugins import MeasureControl, LocateControl, MarkerCluster
 from streamlit_folium import st_folium
 
 # ============================================================
-# Solar Mkt Map - v5 final stability version
-# Existing UX/features are intentionally preserved:
-# - Yeongnam dropdowns
-# - building-register target discovery
-# - satellite + cadastral layer
-# - current-location / measure / compass
-# - performance optimized markers + stable selection
-# - existing target edit
-# - manual target registration
-# - navigation links
-# - daily activity log
-# - Google Sheets persistence; CSV is fallback ONLY when Sheets is unavailable
-# - NEW: stable site_id, cumulative activity log, safer secrets,
-#        duplicate detection, timeouts, clearer save errors
-# - PERFORMANCE: cached Google Sheets client/data; map zoom/pan do not request
-#        zoom/center back to Python; marker clustering is used at low zoom.
+# Solar Mkt Map - v5 final stability version (503 Error Fix & Default Region)
 # ============================================================
 
 st.set_page_config(page_title="Solar Mkt Map", layout="centered")
 
-# ============================================================
-# CODE INTEGRITY NOTICE
-# 1) This file is pure Python. Never convert URLs to Markdown links.
-# 2) Keep Python identifiers such as streamlit_folium unescaped.
-# 3) Existing working functions/features must be preserved when improving code.
-# 4) CSV is NOT a silent recovery path when Google Sheets is configured.
-#    If Sheets is configured but a write fails, report the failure.
-#    CSV is used only when Google Sheets is unavailable/unconfigured.
-# 5) Never restore the old full-sheet clear-and-rewrite behavior.
-# 6) Marker selection uses the 6-decimal coordinate key; do not replace it
-#    with nearest/fuzzy matching.
-# 7) New blank-map registration keeps the 20 m duplicate guard.
-# 8) Public building-register discovery groups by normalized parcel address
-#    and sums building areas before applying the minimum-area threshold.
-# ============================================================
+# --- 통신 세션 설정 (서버 과부하 방어 및 연결 안정화) ---
+HTTP_SESSION = requests.Session()
+retry_strategy = Retry(
+    total=3,
+    backoff_factor=1,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["HEAD", "GET", "OPTIONS"]
+)
+adapter = HTTPAdapter(max_retries=retry_strategy)
+HTTP_SESSION.mount("http://", adapter)
+HTTP_SESSION.mount("https://", adapter)
 
 # ------------------------- Secrets ----------------------------
 def secret(name: str, default: str = "") -> str:
-    """Read Streamlit secret first, then environment variable."""
     try:
         value = st.secrets.get(name, default)
         if value:
@@ -100,7 +82,6 @@ STATUS_COLORS = {
     "기설치": "gray",
 }
 
-# Existing Yeongnam selection structure retained from the working version.
 REGION_DATA = {
     "부산광역시": {
         "강서구": ["녹산동", "송정동", "명지동", "명지1동", "명지2동", "대저1동", "대저2동", "강동동", "가락동", "가달동", "구랑동", "미음동", "범방동", "봉림동", "생곡동", "성북동", "식만동", "신호동", "죽동동", "죽림동", "지사동", "천성동", "화전동"],
@@ -181,11 +162,11 @@ REGION_DATA = {
 def init_state():
     defaults = {
         "target_data": pd.DataFrame(columns=TARGET_COLS),
-        "search_center": [35.0910, 128.8475],
+        "search_center": [35.0886, 128.8659],  # 강서구 녹산동 좌표
         "map_zoom": 15,
         "current_tab": "",
         "selected_site_id": None,
-        "selected_addr": None,  # legacy compatibility
+        "selected_addr": None,
         "new_pin_coord": None,
         "save_success": False,
         "last_loaded_tab": "",
@@ -220,11 +201,7 @@ st.markdown('<div class="main-header"><h2>Solar Mkt Map ☀️</h2></div>', unsa
 def now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-
 def normalize_address(value) -> str:
-    """Normalize parcel-address strings for duplicate detection.
-    Keeps Korean/number semantics while removing spacing and common suffix noise.
-    """
     text = "" if value is None else str(value)
     text = text.strip().lower()
     text = text.replace("번지", "")
@@ -233,14 +210,11 @@ def normalize_address(value) -> str:
     text = text.replace("-", "-")
     return text
 
-
 def coord_key(lat, lng) -> str:
-    """Stable marker key: latitude/longitude rounded to 6 decimals."""
     try:
         return f"{float(lat):.6f}|{float(lng):.6f}"
     except Exception:
         return ""
-
 
 def haversine_m(lat1, lon1, lat2, lon2) -> float:
     r = 6371000.0
@@ -250,7 +224,6 @@ def haversine_m(lat1, lon1, lat2, lon2) -> float:
     a = math.sin(dp/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
     return 2*r*math.asin(min(1.0, math.sqrt(a)))
 
-
 def new_site_id(df: pd.DataFrame) -> str:
     if df.empty or "site_id" not in df.columns:
         return "SITE-000001"
@@ -259,13 +232,10 @@ def new_site_id(df: pd.DataFrame) -> str:
     n = int(nums.max()) + 1 if not nums.empty else len(df) + 1
     return f"SITE-{n:06d}"
 
-
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=TARGET_COLS)
     df = df.copy()
-
-    # Backward compatibility with the old schema.
     rename_map = {}
     if "건물명" in df.columns and "상호명" not in df.columns:
         rename_map["건물명"] = "상호명"
@@ -291,7 +261,6 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
         df["수동등록"] = False
     df["수동등록"] = df["수동등록"].astype(str).str.lower().isin(["true", "1", "yes", "y", "t"])
 
-    # Stable ID migration for old data.
     seen = set()
     generated = []
     for sid in df["site_id"].astype(str):
@@ -311,10 +280,8 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
         next_num += 1
     df["site_id"] = generated
 
-    # Put known columns first, preserve unknown columns after them.
     extras = [c for c in df.columns if c not in TARGET_COLS]
     return df[TARGET_COLS + extras]
-
 
 def require_api_keys() -> bool:
     missing = []
@@ -330,14 +297,12 @@ def require_api_keys() -> bool:
         return False
     return True
 
-
 # ------------------------- Google Sheets ----------------------
 @st.cache_resource(ttl=3600, show_spinner=False)
 def get_gspread_client():
     if not GS_AVAILABLE or not GOOGLE_SHEET_ID:
         return None
     try:
-        # Supports the nested Streamlit secrets format used by the previous version.
         service_info = None
         try:
             service_info = st.secrets.get("gcp_service_account")
@@ -356,17 +321,14 @@ def get_gspread_client():
     except Exception:
         return None
 
-
 def sheets_enabled() -> bool:
     return get_gspread_client() is not None
-
 
 def get_or_create_ws(sh, title, rows=100, cols=30):
     try:
         return sh.worksheet(title)
     except Exception:
         return sh.add_worksheet(title=title, rows=str(max(rows, 100)), cols=str(max(cols, 20)))
-
 
 @st.cache_data(ttl=30, show_spinner=False)
 def load_target_data(tab_name: str) -> pd.DataFrame:
@@ -389,41 +351,30 @@ def load_target_data(tab_name: str) -> pd.DataFrame:
             st.error(f"CSV 불러오기 실패: {e}")
     return pd.DataFrame(columns=TARGET_COLS)
 
-
 def _sheet_headers(ws):
     headers = ws.row_values(1)
     if not headers:
         headers = TARGET_COLS.copy()
         ws.update(values=[headers], range_name="A1", value_input_option="USER_ENTERED")
     elif headers[:len(TARGET_COLS)] != TARGET_COLS:
-        # Existing sheets may contain the same columns in a different order.
-        # Do not clear data; only create the canonical header when the sheet is empty.
         if len(headers) < len(TARGET_COLS):
             merged = headers + [c for c in TARGET_COLS if c not in headers]
             ws.update(values=[merged], range_name="A1", value_input_option="USER_ENTERED")
             headers = merged
     return headers
 
-
 def _row_values_from_record(record, headers):
     return [record.get(h, "") for h in headers]
 
-
 def save_target_data(tab_name: str, df: pd.DataFrame) -> bool:
-    """Initial/full write only. Used when creating a brand-new regional DB.
-    Existing row edits use save_target_row() and do not clear the worksheet.
-    """
     df_save = normalize_df(df)
     gc = get_gspread_client()
-
     if gc:
         try:
             sh = gc.open_by_key(GOOGLE_SHEET_ID)
             ws = get_or_create_ws(sh, tab_name, rows=max(len(df_save) + 50, 100), cols=max(len(TARGET_COLS), 20))
             existing = ws.get_all_values()
             if existing and len(existing) > 1:
-                # Safety: this function must never overwrite a populated sheet.
-                # Use row-level functions instead.
                 st.error("기존 Google Sheets 데이터가 있어 전체 덮어쓰기를 차단했습니다. 행 단위 저장을 사용하세요.")
                 return False
             _sheet_headers(ws)
@@ -436,7 +387,6 @@ def save_target_data(tab_name: str, df: pd.DataFrame) -> bool:
             st.error(f"Google Sheets 저장 실패: {e}")
             return False
 
-    # CSV remains an explicit fallback only when Google Sheets is unavailable.
     try:
         df_save.to_csv(f"{tab_name}.csv", index=False, encoding="utf-8-sig")
         load_target_data.clear()
@@ -445,12 +395,9 @@ def save_target_data(tab_name: str, df: pd.DataFrame) -> bool:
         st.error(f"CSV 저장 실패: {e}")
         return False
 
-
 def save_target_row(tab_name: str, row_dict: dict, append_if_missing: bool = False) -> bool:
-    """Update exactly one Google Sheets row by site_id, or append a new row."""
     row = normalize_df(pd.DataFrame([row_dict])).iloc[0].to_dict()
     gc = get_gspread_client()
-
     if gc:
         try:
             sh = gc.open_by_key(GOOGLE_SHEET_ID)
@@ -471,7 +418,6 @@ def save_target_row(tab_name: str, row_dict: dict, append_if_missing: bool = Fal
             if cell is not None:
                 last_col = chr(64 + len(headers)) if len(headers) <= 26 else None
                 if last_col is None:
-                    # gspread utility keeps column conversion compatible with wide sheets.
                     from gspread.utils import rowcol_to_a1
                     start_a1 = rowcol_to_a1(cell.row, 1)
                     end_a1 = rowcol_to_a1(cell.row, len(headers))
@@ -490,7 +436,6 @@ def save_target_row(tab_name: str, row_dict: dict, append_if_missing: bool = Fal
             st.error(f"Google Sheets 행 저장 실패: {e}")
             return False
 
-    # CSV mode: preserve the existing behavior, but never claim success on failure.
     filename = f"{tab_name}.csv"
     try:
         existing = load_target_data(tab_name)
@@ -509,17 +454,12 @@ def save_target_row(tab_name: str, row_dict: dict, append_if_missing: bool = Fal
         st.error(f"CSV 저장 실패: {e}")
         return False
 
-
 def append_activity(site_id: str, tab_name: str, before: dict, after: dict, action: str) -> bool:
-    """Append one activity row. If Sheets is configured but write fails, report failure;
-    do not silently downgrade to CSV. CSV is used only when Sheets is unavailable.
-    """
     row = activity_row(site_id, tab_name, before, after, action)
     headers = [
         "기록일시", "site_id", "지역탭", "상호명", "지번주소",
         "접촉방식", "상태", "면적", "메모", "변경내역", "행동"
     ]
-
     gc = get_gspread_client()
     if gc:
         try:
@@ -538,7 +478,6 @@ def append_activity(site_id: str, tab_name: str, before: dict, after: dict, acti
             st.warning("활동 이력은 저장되지 않았습니다. Google Sheets 연결 상태를 확인하세요.")
             return False
 
-    # CSV is a true fallback only when Google Sheets is not configured/available.
     path = "activity_log.csv"
     try:
         old = pd.read_csv(path) if os.path.exists(path) else pd.DataFrame(columns=headers)
@@ -551,7 +490,6 @@ def append_activity(site_id: str, tab_name: str, before: dict, after: dict, acti
         st.session_state.activity_status = f"CSV 활동 이력 저장 실패: {e}"
         st.error("활동 이력 저장에 실패했습니다.")
         return False
-
 
 def activity_row(site_id, tab_name, before, after, action):
     changes = []
@@ -575,7 +513,6 @@ def activity_row(site_id, tab_name, before, after, action):
         "변경내역": " | ".join(changes) if changes else "단순열람(수정없음)",
         "행동": action,
     }
-
 
 @st.cache_data(ttl=10, show_spinner=False)
 def load_activity_log() -> pd.DataFrame:
@@ -602,18 +539,15 @@ def load_activity_log() -> pd.DataFrame:
             pass
     return pd.DataFrame()
 
-
 # ------------------------- Kakao API --------------------------
 def kakao_headers():
     return {"Authorization": f"KakaoAK {KAKAO_REST_KEY}"}
-
 
 def kakao_get(path: str, params: dict, timeout: int = 10):
     url = f"https://dapi.kakao.com{path}"
     response = requests.get(url, headers=kakao_headers(), params=params, timeout=timeout)
     response.raise_for_status()
     return response.json()
-
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def geocode_address(address: str):
@@ -625,7 +559,6 @@ def geocode_address(address: str):
         return {"lat": float(d["y"]), "lng": float(d["x"]), "b_code": d.get("address", {}).get("b_code", "")}
     except Exception:
         return None
-
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def reverse_geocode(lat: float, lng: float):
@@ -641,7 +574,6 @@ def reverse_geocode(lat: float, lng: float):
     except Exception:
         return "직접 입력 필요", ""
 
-
 @st.cache_data(ttl=86400, show_spinner=False)
 def place_name_for_address(address: str):
     try:
@@ -652,77 +584,184 @@ def place_name_for_address(address: str):
         pass
     return ""
 
-
 def get_place_info_from_coords(lat, lng):
     address_name, _ = reverse_geocode(lat, lng)
     building_name = place_name_for_address(address_name) if address_name != "직접 입력 필요" else ""
     return address_name, building_name
 
-# ------------------------- Data discovery ----------------------
+# ------------------------- Data discovery (503 방어 로직 적용) ----------------------
 def fetch_building_targets(sigungu_cd: str, bjdong_cd: str):
     raw = []
     page_no = 1
     total_count = 0
     MAX_PAGES = 500
     MAX_ITEMS = 50000
+
     progress = st.progress(0)
     status_box = st.empty()
 
-    while page_no <= MAX_PAGES and len(raw) < MAX_ITEMS:
-        url = "https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo"
-        params = {
-            "serviceKey": DATA_GO_KR_KEY,
-            "sigunguCd": sigungu_cd,
-            "bjdongCd": bjdong_cd,
-            "numOfRows": 100,
-            "pageNo": page_no,
-            "_type": "json",
-        }
-        try:
-            r = requests.get(url, params=params, timeout=20)
-            if r.status_code == 429:
-                time.sleep(min(2.0, 0.5 * (2 ** min(page_no % 3, 2))))
-                r = requests.get(url, params=params, timeout=20)
-            r.raise_for_status()
-            data = r.json()
-            header = data.get("response", {}).get("header", {})
-            if header.get("resultCode") != "00":
-                raise RuntimeError(header.get("resultMsg", "건축물대장 API 오류"))
-            body = data.get("response", {}).get("body", {})
-            total_count = int(body.get("totalCount", 0) or 0)
-            items = body.get("items", {}).get("item", [])
-            if isinstance(items, dict):
-                items = [items]
-            if not items:
-                break
-            for item in items:
-                try:
-                    area = float(item.get("archArea", 0) or 0)
-                except Exception:
-                    area = 0.0
-                raw.append({
-                    "지번주소": item.get("platPlc", "주소없음"),
-                    "건물명": item.get("bldNm", ""),
-                    "건축면적(㎡)": area,
-                })
-                if len(raw) >= MAX_ITEMS:
-                    break
-            progress.progress(min(len(raw) / max(total_count, 1), 1.0))
-            status_box.info(f"건축물대장 수집 중: {len(raw):,}/{total_count:,}건")
-            if len(raw) >= MAX_ITEMS or page_no * 100 >= total_count:
-                break
-            page_no += 1
-            # Conservative Kakao-like pacing is not needed here; public API is paged.
-            time.sleep(0.02)
-        except Exception as e:
-            progress.empty(); status_box.empty()
-            raise RuntimeError(f"건축물대장 조회 실패: {e}")
+    service_key = DATA_GO_KR_KEY.strip()
+    key_is_encoded = "%" in service_key
 
-    progress.empty(); status_box.empty()
+    urls_to_try = [
+        "https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo",
+        "https://apis.data.go.kr/1613000/BldRgstService_2.0/getBrTitleInfo",
+    ]
+
+    successful_url = None
+    server_error_count = 0  
+
+    while page_no <= MAX_PAGES and len(raw) < MAX_ITEMS:
+        candidate_urls = [successful_url] if successful_url else urls_to_try
+        page_success = False
+        items = []
+        last_error_msg = ""
+
+        for url in candidate_urls:
+            for attempt in range(3):
+                try:
+                    if key_is_encoded:
+                        request_url = f"{url}?serviceKey={service_key}"
+                        params = {
+                            "sigunguCd": sigungu_cd,
+                            "bjdongCd": bjdong_cd,
+                            "numOfRows": 100,
+                            "pageNo": page_no,
+                            "_type": "json",
+                        }
+                        r = HTTP_SESSION.get(request_url, params=params, timeout=20)
+                    else:
+                        params = {
+                            "serviceKey": service_key,
+                            "sigunguCd": sigungu_cd,
+                            "bjdongCd": bjdong_cd,
+                            "numOfRows": 100,
+                            "pageNo": page_no,
+                            "_type": "json",
+                        }
+                        r = HTTP_SESSION.get(url, params=params, timeout=20)
+
+                    if r.status_code >= 500:
+                        server_error_count += 1
+                        wait_seconds = 2 ** (attempt + 1)
+                        last_error_msg = f"서버 응답 없음 {r.status_code} (재시도 {attempt + 1}/3, {wait_seconds}초 대기)"
+                        status_box.warning(f"공공데이터포털 서버 응답 지연... {wait_seconds}초 대기 후 재시도 ({attempt + 1}/3)")
+                        time.sleep(wait_seconds)
+                        continue
+
+                    if r.status_code == 429:
+                        wait_seconds = 2 ** (attempt + 1)
+                        time.sleep(wait_seconds)
+                        continue
+
+                    response_text = r.text.strip()
+                    if r.status_code >= 400:
+                        last_error_msg = f"HTTP {r.status_code} @ {url.split('/')[-1]}"
+                        break
+
+                    if response_text.startswith("<"):
+                        if "SERVICE_KEY_IS_NOT_REGISTERED" in response_text:
+                            raise RuntimeError("❌ 인증키가 등록되지 않았습니다.\n공공데이터포털에서 활용 신청 및 승인 여부, '일반 인증키 (Encoding)' 값을 확인하세요.")
+                        if "LIMITED_NUMBER" in response_text:
+                            raise RuntimeError("❌ 일일 트래픽 한도 초과")
+                        if "NO_OPENAPI_SERVICE" in response_text:
+                            last_error_msg = "API 서비스 없음"
+                            break
+                        last_error_msg = f"XML 오류: {response_text[:200]}"
+                        break
+
+                    try:
+                        data = r.json()
+                    except Exception:
+                        last_error_msg = f"JSON 파싱 실패: {response_text[:200]}"
+                        break
+
+                    header = data.get("response", {}).get("header", {})
+                    result_code = str(header.get("resultCode", "")).strip()
+                    if result_code and result_code != "00":
+                        last_error_msg = header.get("resultMsg", f"resultCode={result_code}")
+                        break
+
+                    body = data.get("response", {}).get("body", {})
+                    total_count = int(body.get("totalCount", 0) or 0)
+                    items = body.get("items", {}).get("item", [])
+                    if isinstance(items, dict):
+                        items = [items]
+
+                    successful_url = url
+                    page_success = True
+
+                    if not items:
+                        break
+
+                    for item in items:
+                        try:
+                            area = float(item.get("archArea", 0) or 0)
+                        except Exception:
+                            area = 0.0
+                        raw.append({
+                            "지번주소": item.get("platPlc", "주소없음"),
+                            "건물명": item.get("bldNm", ""),
+                            "건축면적(㎡)": area,
+                        })
+                        if len(raw) >= MAX_ITEMS:
+                            break
+
+                    processed = min(len(raw), total_count) if total_count else len(raw)
+                    progress.progress(min(processed / max(total_count, 1), 1.0))
+                    status_box.info(f"건축물대장 수집 중: {processed:,}/{total_count:,}건")
+                    break 
+
+                except requests.exceptions.Timeout:
+                    wait_seconds = 2 ** (attempt + 1)
+                    last_error_msg = f"응답 시간 초과 (재시도 {attempt + 1}/3, {wait_seconds}초 대기)"
+                    time.sleep(wait_seconds)
+                    continue
+                except requests.exceptions.RequestException as exc:
+                    wait_seconds = 2 ** (attempt + 1)
+                    last_error_msg = f"통신 오류 (재시도 {attempt + 1}/3): {exc}"
+                    time.sleep(wait_seconds)
+                    continue
+                except RuntimeError:
+                    progress.empty()
+                    status_box.empty()
+                    raise
+                except Exception as exc:
+                    last_error_msg = f"예외: {exc}"
+                    break
+
+            if page_success:
+                break
+
+        if not page_success:
+            progress.empty()
+            status_box.empty()
+            key_preview = f"{service_key[:6]}...{service_key[-6:]}" if len(service_key) > 12 else "너무 짧음"
+            is_server_error = "500" in last_error_msg or "503" in last_error_msg or "서버 응답 없음" in last_error_msg or "시간 초과" in last_error_msg
+            
+            if is_server_error:
+                raise RuntimeError(f"⚠️ 공공데이터포털 서버가 일시적으로 응답하지 않습니다.\n이는 코드 문제가 아니라 공공데이터포털의 서버 부하 상태입니다.\n잠시 후 다시 시도하시거나, 업무 시간대를 피해 조회하세요.\n\n세부 정보: {last_error_msg}")
+            else:
+                raise RuntimeError(f"공공데이터포털 통신 실패\n인증키(일부): {key_preview}\n인증키 길이: {len(service_key)}자\nURL 인코딩됨: {'예' if key_is_encoded else '아니오'}\nsigunguCd: {sigungu_cd}, bjdongCd: {bjdong_cd}\n세부 정보: {last_error_msg}")
+
+        if not items or len(raw) >= MAX_ITEMS:
+            break
+        if total_count and page_no * 100 >= total_count:
+            break
+
+        page_no += 1
+        time.sleep(0.05)
+
+    progress.empty()
+    status_box.empty()
+
+    if server_error_count > 0:
+        st.info(f"ℹ️ 수집 중 서버 오류가 {server_error_count}회 발생했습니다. 총 {len(raw):,}건이 정상 수집되었지만 일부 페이지가 누락될 수 있습니다.")
+
     if page_no > MAX_PAGES and total_count > MAX_ITEMS:
         st.warning(f"공공데이터가 {MAX_ITEMS:,}건을 초과하여 안전상 {MAX_ITEMS:,}건까지만 처리했습니다.")
-    return raw
 
+    return raw
 
 def build_target_df(sido, sigungu, dong, min_area):
     center = geocode_address(f"{sido} {sigungu} {dong}")
@@ -766,19 +805,12 @@ def build_target_df(sido, sigungu, dong, min_area):
         })
         bar.progress(i / len(filtered))
         box.info(f"주소 좌표/상호명 변환 중: {i}/{len(filtered)}")
-        # Conservative rate: 20 requests/sec maximum. Cached calls normally avoid repeats.
         time.sleep(0.05)
     bar.empty(); box.empty()
     result = normalize_df(pd.DataFrame(rows))
     return result[result["lat"].ne(0) & result["lng"].ne(0)].reset_index(drop=True), center
 
-
 def merge_discovered_with_existing(existing: pd.DataFrame, discovered: pd.DataFrame) -> pd.DataFrame:
-    """Merge newly discovered >=threshold targets without overwriting user edits.
-    Existing rows always win; only genuinely new parcel addresses are appended.
-    This is what lets a parcel that was below 5,000㎡ today appear automatically
-    when the public building-register total exceeds the threshold on a later refresh.
-    """
     existing = normalize_df(existing)
     discovered = normalize_df(discovered)
     if existing.empty:
@@ -808,10 +840,6 @@ def merge_discovered_with_existing(existing: pd.DataFrame, discovered: pd.DataFr
 # ------------------------- Region/search UI ------------------
 st.markdown('<div class="section-title">타겟 지역 및 조건 설정</div>', unsafe_allow_html=True)
 
-# Streamlit 1.32 selectbox uses a BaseWeb combobox internally. On mobile, the
-# hidden search input can summon the OS keyboard even though this is a selection
-# control. Disable text input only for selectbox comboboxes; normal text_input and
-# number_input fields remain untouched. Users can still open and tap an option.
 st.markdown("""
 <script>
 (function(){
@@ -839,12 +867,25 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 col1, col2, col3 = st.columns(3)
+
+sido_opts = list(REGION_DATA.keys())
+sido_idx = sido_opts.index("부산광역시") if "부산광역시" in sido_opts else 0
+
 with col1:
-    sido = st.selectbox("시/도", list(REGION_DATA.keys()), key="region_sido")
+    sido = st.selectbox("시/도", sido_opts, index=sido_idx, key="region_sido")
+
+sigungu_opts = list(REGION_DATA[sido].keys())
+sigungu_idx = sigungu_opts.index("강서구") if sido == "부산광역시" and "강서구" in sigungu_opts else 0
+
 with col2:
-    sigungu = st.selectbox("시/군/구", list(REGION_DATA[sido].keys()), key="region_sigungu")
+    sigungu = st.selectbox("시/군/구", sigungu_opts, index=sigungu_idx, key="region_sigungu")
+
+dong_opts = REGION_DATA[sido][sigungu]
+dong_idx = dong_opts.index("녹산동") if sido == "부산광역시" and sigungu == "강서구" and "녹산동" in dong_opts else 0
+
 with col3:
-    dong = st.selectbox("읍/면/동", REGION_DATA[sido][sigungu], key="region_dong")
+    dong = st.selectbox("읍/면/동", dong_opts, index=dong_idx, key="region_dong")
+
 min_area = st.number_input("최소 건축면적 (㎡)", min_value=100, value=5000, step=500, key="min_area")
 target_tab_name = f"target_{sido}_{sigungu}_{dong}"
 
@@ -872,7 +913,6 @@ if query_clicked or refresh_clicked:
             with st.spinner("공공데이터를 재조회하여 신규 타겟만 추가합니다..."):
                 discovered, center = build_target_df(sido, sigungu, dong, min_area)
             merged = merge_discovered_with_existing(existing, discovered)
-            # Save only the rows that did not already exist. Existing user edits are never overwritten.
             existing_keys = {normalize_address(v) for v in existing["지번주소"].astype(str)} if not existing.empty else set()
             added = merged[~merged["지번주소"].astype(str).map(normalize_address).isin(existing_keys)].copy()
             save_ok = True
@@ -906,7 +946,6 @@ if query_clicked or refresh_clicked:
 
 # ------------------------- Map -------------------------------
 class CadastralToggle(MacroElement):
-    """Small, reliable Leaflet control for the cadastral WMS layer."""
     _template = Template(r"""
     {% macro script(this, kwargs) %}
     (function() {
@@ -953,8 +992,6 @@ class CadastralToggle(MacroElement):
         self.layer_name = layer_name
 
 class MapViewPersistence(MacroElement):
-    """Persist only the browser-side zoom so marker clicks can rerun Python
-    without resetting the user's current zoom level."""
     _template = Template(r"""
     {% macro script(this, kwargs) %}
     (function() {
@@ -1006,18 +1043,12 @@ with st.expander("지도안내"):
     </div>
     """, unsafe_allow_html=True)
 
-# Satellite imagery is the only base layer shown by default.
-# OpenStreetMap is intentionally removed from the layer selector.
 m = folium.Map(
     location=st.session_state.search_center,
     zoom_start=st.session_state.map_zoom,
     max_zoom=19,
     tiles=None,
 )
-
-# Zoom/pan are intentionally not returned to Python. With the stable st_folium key,
-# Leaflet keeps its current view while click events are returned. This avoids a
-# Streamlit rerun on every mouse-wheel zoom/pan action.
 
 folium.TileLayer(
     tiles="https://xdworld.vworld.kr/2d/Satellite/service/{z}/{x}/{y}.jpeg",
@@ -1030,7 +1061,6 @@ folium.TileLayer(
     show=True,
 ).add_to(m)
 
-# Cadastral layer starts OFF and is controlled by the small custom ON/OFF button.
 cadastral_layer = folium.raster_layers.WmsTileLayer(
     url="https://api.vworld.kr/req/wms",
     layers="lp_pa_cbnd_bubun,lp_pa_cbnd_bonbun",
@@ -1048,11 +1078,8 @@ cadastral_layer = folium.raster_layers.WmsTileLayer(
     show=False,
 ).add_to(m)
 
-# Small cadastral ON/OFF control. No OSM selector is displayed.
 CadastralToggle(cadastral_layer.get_name()).add_to(m)
 
-# Browser-side zoom persistence: no zoom value is returned to Python, so
-# wheel zoom/pan remains fast while marker-click reruns restore the same zoom.
 zoom_storage_key = "solar_mkt_zoom::" + target_tab_name
 MapViewPersistence(zoom_storage_key).add_to(m)
 
@@ -1099,10 +1126,6 @@ df_filtered = df_all[df_all["면적"] >= float(min_area)].copy() if not df_all.e
 marker_count = 0
 coord_missing_count = 0
 
-# MarkerCluster reduces browser DOM/Leaflet work when many targets are visible.
-# At zoom 17+ markers are individual so a field user can select a specific site.
-# A few dozen markers are faster as plain Leaflet markers. Use clustering only
-# when the visible dataset becomes large.
 if len(df_filtered) >= 100:
     marker_parent = MarkerCluster(
         name="현장 핀",
@@ -1140,9 +1163,6 @@ for _, row in df_filtered.iterrows():
 
 st.caption(f"지도 표시 대상 {len(df_filtered):,}건 · 실제 핀 {marker_count:,}개 · 좌표 없음 {coord_missing_count:,}개")
 
-# IMPORTANT: Do not request zoom/center from st_folium.
-# That makes every wheel/pan action feed Python/Streamlit and can cause a full rerun.
-# We only need click events here; normal zoom/pan stays entirely inside Leaflet.
 map_center = tuple(float(v) for v in st.session_state.search_center)
 
 map_data = st_folium(
@@ -1157,8 +1177,6 @@ map_data = st_folium(
 clicked_marker = map_data.get("last_object_clicked")
 clicked_map = map_data.get("last_clicked")
 
-# Marker click: exact 6-decimal coordinate hash -> site_id.
-# No nearest/fuzzy matching is used for marker selection.
 if clicked_marker:
     clicked_key = coord_key(clicked_marker.get("lat"), clicked_marker.get("lng"))
     if clicked_key:
@@ -1178,8 +1196,6 @@ if clicked_marker:
                 st.session_state.search_center = [float(row["lat"]), float(row["lng"])]
                 st.rerun()
 
-# Blank map click: only a true blank area creates a new pin.
-# A 20m proximity guard prevents accidental duplicates near an existing marker.
 if clicked_map and not clicked_marker:
     lat, lng = float(clicked_map["lat"]), float(clicked_map["lng"])
     nearest = None
@@ -1270,7 +1286,6 @@ if selected_comp is not None:
             "수정일시": now_str(),
             "메모": memo,
         })
-        # Keep a concise last-change summary for the existing UI.
         changes = []
         for label, key in [("상태", "상태"), ("방식", "컨택방식"), ("면적", "면적"), ("상호명", "상호명")]:
             if str(before.get(key, "")) != str(after.get(key, "")):
@@ -1306,7 +1321,6 @@ elif st.session_state.new_pin_coord:
         new_name = st.text_input("상호명", value=auto_name)
         new_area = st.number_input("예상 지붕 면적(㎡)", min_value=0.0, value=float(min_area), step=100.0)
         if st.form_submit_button("신규 현장 등록", use_container_width=True):
-            # Address duplicate check first.
             duplicate = df_all[df_all["지번주소"].astype(str).map(normalize_address) == normalize_address(new_addr)]
             if not duplicate.empty:
                 st.warning(f"이미 등록된 주소입니다. 현장ID: {duplicate.iloc[0]['site_id']}")
@@ -1352,7 +1366,6 @@ selected_date = st.date_input("조회 일자 선택", value=datetime.today())
 date_str = selected_date.strftime("%Y-%m-%d")
 
 activity = load_activity_log()
-# Show just-written records immediately even if Google Sheets has a short read delay.
 session_rows = st.session_state.get("activity_rows_session", [])
 if session_rows:
     session_df = pd.DataFrame(session_rows)
@@ -1382,6 +1395,5 @@ if not activity.empty and "기록일시" in activity.columns:
 else:
     st.info("아직 누적 영업활동 이력이 없습니다. 현장을 수정/등록하면 이력에 쌓입니다.")
 
-# Small status footer for deployment checks.
 mode = "Google Sheets" if sheets_enabled() else "CSV(개발/임시)"
 st.caption(f"저장 모드: {mode}  |  현재 지역: {sido} {sigungu} {dong}")
